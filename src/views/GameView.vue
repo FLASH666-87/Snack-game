@@ -59,6 +59,35 @@ const jOffsetY = ref(0)
 const jActive = ref(false)
 const joystickDir = ref<Direction | null>(null)
 
+const isFullscreen = ref(false)
+
+function toggleFullscreen() {
+  if (!document.fullscreenElement) {
+    const el = document.documentElement
+    if (el.requestFullscreen) {
+      el.requestFullscreen()
+    } else if ((el as any).webkitRequestFullscreen) {
+      (el as any).webkitRequestFullscreen()
+    } else if ((el as any).msRequestFullscreen) {
+      (el as any).msRequestFullscreen()
+    }
+  } else {
+    if (document.exitFullscreen) {
+      document.exitFullscreen()
+    } else if ((document as any).webkitExitFullscreen) {
+      (document as any).webkitExitFullscreen()
+    } else if ((document as any).msExitFullscreen) {
+      (document as any).msExitFullscreen()
+    }
+  }
+}
+
+function onFullscreenChange() {
+  isFullscreen.value = !!document.fullscreenElement
+    || !!(document as any).webkitFullscreenElement
+    || !!(document as any).msFullscreenElement
+}
+
 let lastUpdateTime = 0
 let animationId = 0
 let growCounter = 0
@@ -132,6 +161,9 @@ onMounted(() => {
   document.addEventListener('touchend', onJoystickEnd)
   document.addEventListener('touchcancel', onJoystickEnd)
   document.addEventListener('keydown', handleKeydown)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+  document.addEventListener('MSFullscreenChange', onFullscreenChange)
 })
 
 onUnmounted(() => {
@@ -143,6 +175,9 @@ onUnmounted(() => {
   document.removeEventListener('touchend', onJoystickEnd)
   document.removeEventListener('touchcancel', onJoystickEnd)
   document.removeEventListener('keydown', handleKeydown)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+  document.removeEventListener('MSFullscreenChange', onFullscreenChange)
   cancelAnimationFrame(animationId)
 })
 
@@ -1222,6 +1257,7 @@ function resizeCanvas() {
       <button class="pause-btn pause-btn-desktop" @click="togglePause">
         {{ gameStatus === 'playing' ? '⏸' : '▶' }}
       </button>
+      <button class="fs-btn" @click="toggleFullscreen">{{ isFullscreen ? '⤓' : '⛶' }}</button>
 
       <div class="overlay" v-if="gameStatus !== 'playing'">
         <div class="overlay-content">
@@ -1310,6 +1346,7 @@ function resizeCanvas() {
       <button class="pause-btn" @click="togglePause">
         {{ gameStatus === 'playing' ? '⏸' : '▶' }}
       </button>
+      <button class="fs-btn" @click="toggleFullscreen">{{ isFullscreen ? '⤓' : '⛶' }}</button>
 
       <div class="joystick" ref="joystickRef">
         <div class="joystick-ring">
@@ -1567,6 +1604,30 @@ html, body {
 
 .pause-btn-desktop:hover {
   background: rgba(255, 255, 255, 0.15);
+}
+
+.fs-btn {
+  position: absolute;
+  top: calc(12px + env(safe-area-inset-top, 0px));
+  right: calc(68px + env(safe-area-inset-right, 0px));
+  width: 48px;
+  height: 48px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 50%;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+  font-size: 20px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  backdrop-filter: blur(4px);
+  z-index: 2;
+  transition: background 0.1s;
+}
+
+.fs-btn:active {
+  background: rgba(255, 255, 255, 0.2);
 }
 
 .joystick {
