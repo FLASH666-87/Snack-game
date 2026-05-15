@@ -199,6 +199,10 @@ function togglePause() {
 }
 
 function startGame() {
+  if (isMobile.value && !isFullscreen.value) {
+    try { toggleFullscreen() } catch (_) {}
+    try { (screen as any).orientation?.lock?.('landscape').catch(() => {}) } catch (_) {}
+  }
   const startX = Math.floor(gridCols.value / 2)
   const startY = Math.floor(gridRows / 2)
   snake.value = [{ x: startX, y: startY }]
@@ -1335,7 +1339,7 @@ function resizeCanvas() {
     <template v-else-if="!isLandscape">
       <div class="rotate-hint">
         <div class="rotate-icon">↻</div>
-        <p>請旋轉至橫向</p>
+        <p>請旋轉手機以開始遊戲</p>
       </div>
     </template>
 
@@ -1438,9 +1442,14 @@ html, body {
 .canvas-wrapper {
   position: fixed;
   inset: 0;
+  width: 100%;
+  height: 100%;
+  height: 100dvh;
   overflow: hidden;
   touch-action: none;
   -ms-touch-action: none;
+  -webkit-overflow-scrolling: none;
+  overscroll-behavior: none;
 }
 
 #gameCanvas {
@@ -1454,8 +1463,10 @@ html, body {
   top: 0;
   left: 0;
   right: 0;
-  padding: 16px 24px;
-  padding-top: calc(16px + env(safe-area-inset-top, 0px));
+  padding: 8px 16px;
+  padding-top: calc(8px + env(safe-area-inset-top, 0px));
+  padding-left: calc(16px + env(safe-area-inset-left, 0px));
+  padding-right: calc(16px + env(safe-area-inset-right, 0px));
   font-size: 24px;
   font-weight: 600;
   color: #fff;
@@ -1467,8 +1478,10 @@ html, body {
 
 .score-bar-mobile {
   font-size: 18px;
-  padding: 10px 16px;
-  padding-top: calc(10px + env(safe-area-inset-top, 0px));
+  padding: 6px 12px;
+  padding-top: calc(6px + env(safe-area-inset-top, 0px));
+  padding-left: calc(12px + env(safe-area-inset-left, 0px));
+  padding-right: calc(12px + env(safe-area-inset-right, 0px));
 }
 
 .overlay {
@@ -1514,8 +1527,8 @@ html, body {
 
 .controls {
   position: absolute;
-  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
-  left: calc(24px + env(safe-area-inset-left, 0px));
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -1580,15 +1593,15 @@ html, body {
 
 .pause-btn {
   position: absolute;
-  top: calc(12px + env(safe-area-inset-top, 0px));
-  right: calc(12px + env(safe-area-inset-right, 0px));
-  width: 48px;
-  height: 48px;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  right: calc(8px + env(safe-area-inset-right, 0px));
+  width: 44px;
+  height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.35);
   color: #fff;
-  font-size: 22px;
+  font-size: 20px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1608,15 +1621,15 @@ html, body {
 
 .fs-btn {
   position: absolute;
-  top: calc(12px + env(safe-area-inset-top, 0px));
-  right: calc(68px + env(safe-area-inset-right, 0px));
-  width: 48px;
-  height: 48px;
+  top: calc(8px + env(safe-area-inset-top, 0px));
+  right: calc(60px + env(safe-area-inset-right, 0px));
+  width: 44px;
+  height: 44px;
   border: 1px solid rgba(255, 255, 255, 0.2);
   border-radius: 50%;
   background: rgba(0, 0, 0, 0.35);
   color: #fff;
-  font-size: 20px;
+  font-size: 18px;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1632,12 +1645,12 @@ html, body {
 
 .joystick {
   position: absolute;
-  bottom: calc(24px + env(safe-area-inset-bottom, 0px));
-  left: calc(24px + env(safe-area-inset-left, 0px));
+  bottom: calc(16px + env(safe-area-inset-bottom, 0px));
+  left: calc(12px + env(safe-area-inset-left, 0px));
   z-index: 2;
   width: 160px;
   height: 160px;
-  transform: scale(0.75);
+  transform: scale(0.65);
   transform-origin: bottom left;
 }
 
