@@ -13,14 +13,19 @@
   </head>
   <body>
     <div id="app"></div>
-    <noscript>
-      <div style="padding:40px;text-align:center;font-family:sans-serif;background:#1a1a2e;color:#fff;min-height:100vh">
-        <h1>🐍 貪吃蛇</h1>
-        <p>經典 Snake 遊戲，支援多人排行榜</p>
-        <p>使用 Google 帳號登入即可開始遊玩</p>
-        <p><a href="https://flash666-87.github.io/Snack-game/privacy" style="color:#4caf50">隱私權政策</a></p>
-      </div>
-    </noscript>
+    <div id="app-info">
+      <p>🐍 貪吃蛇 - 經典 Snake 遊戲，使用 Google 帳號登入即可遊玩，分數會記錄在排行榜上與朋友比拼</p>
+      <p><a href="https://flash666-87.github.io/Snack-game/privacy">隱私權政策</a></p>
+    </div>
+    <script>
+      // Remove static info after Vue mounts so it doesn't duplicate the app UI
+      var check = setInterval(function() {
+        if (document.querySelector('#app > *')) {
+          document.getElementById('app-info').style.display = 'none';
+          clearInterval(check);
+        }
+      }, 100);
+    </script>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
