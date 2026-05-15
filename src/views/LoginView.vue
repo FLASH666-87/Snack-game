@@ -35,6 +35,7 @@ async function loginGoogle() {
       </button>
 
       <p class="lb-link" @click="router.push('/leaderboard')">🏆 排行榜</p>
+      <p class="privacy-link" @click="router.push('/privacy')">隱私權政策</p>
     </div>
   </div>
 </template>
@@ -120,5 +121,17 @@ async function loginGoogle() {
 
 .lb-link:hover {
   opacity: 1;
+}
+
+.privacy-link {
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.4;
+  cursor: pointer;
+  transition: opacity 0.15s;
+}
+
+.privacy-link:hover {
+  opacity: 0.8;
 }
 </style>
