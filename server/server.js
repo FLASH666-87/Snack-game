@@ -322,6 +322,15 @@ function getRoomState(room) {
   }
 }
 
+// Serve frontend static files in production (must be after API routes)
+const distPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
+if (existsSync(distPath)) {
+  app.use(express.static(distPath))
+  app.get('*', (req, res) => {
+    res.sendFile(join(distPath, 'index.html'))
+  })
+}
+
 const PORT = process.env.PORT || 3001
 httpServer.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`)
