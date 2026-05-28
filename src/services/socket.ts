@@ -1,6 +1,17 @@
 import { io, Socket } from 'socket.io-client'
 
-const SOCKET_URL = import.meta.env.VITE_SOCKET_URL || ''
+const VITE_SOCKET_URL: string = import.meta.env.VITE_SOCKET_URL || ''
+
+function getSocketUrl(): string {
+  const origin = typeof window !== 'undefined' ? window.location.origin : ''
+  // github.io → connect to Railway (cross-origin)
+  if (typeof window !== 'undefined' && window.location.hostname.includes('github.io')) {
+    return 'https://snack-game-production.up.railway.app'
+  }
+  return origin
+}
+
+const SOCKET_URL = VITE_SOCKET_URL.startsWith('http') ? VITE_SOCKET_URL : getSocketUrl()
 
 let socket: Socket | null = null
 let reconnectAttempts = 0
