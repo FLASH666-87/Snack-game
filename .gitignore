@@ -1,7 +1,8 @@
 # Environment variables
 .env
 
-server/
+# Server runtime data
+server/data/
 
 # Logs
 logs
@@ -13,6 +14,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+npm
 .DS_Store
 dist
 dist-ssr

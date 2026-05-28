@@ -1,64 +1,132 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useAuthStore } from '../stores/auth'
-import { useScoreStore } from '../stores/score'
+import { connectSocket, disconnectSocket } from '../services/socket'
+import type { Socket } from 'socket.io-client'
 
 const canvas = ref<HTMLCanvasElement>()
 const joystickRef = ref<HTMLElement>()
+
+// ---- Multiplayer state ----
+const gamePhase = ref<'lobby' | 'playing' | 'dead' | 'gameover'>('lobby')
+const roomCode = ref('')
+const playersInRoom = ref<PlayerInfo[]>([])
+const connected = ref(false)
+const myId = ref('')
+const joinCodeInput = ref('')
+const errorMsg = ref('')
+const isHost = computed(() => playersInRoom.value.length > 0 && playersInRoom.value[0]?.id === myId.value)
+
+interface PlayerInfo {
+  id: string
+  username: string
+  alive: boolean
+}
+
+interface ServerPlayer {
+  id: string
+  username: string
+  segments: { x: number; y: number }[]
+  direction: number
+  score: number
+  shields: number
+  boosting: boolean
+  alive: boolean
+  phantomActive: boolean
+  phantomCharges: number
+  phantomEndTime: number
+  dietHeadEndTime: number
+  magnetActive: boolean
+  magnetEndTime: number
+  invincibleEndTime: number
+  knockbackX: number
+  knockbackY: number
+  laserCharges: number
+  firingLaser: boolean
+  laserDirection: number
+  laserOriginX: number
+  laserOriginY: number
+}
+
+interface ServerGameState {
+  players: Record<string, ServerPlayer>
+  foods: FoodItem[]
+  phantomItems: SkillItem[]
+  shieldItems: SkillItem[]
+  dietItems: SkillItem[]
+  magnetItems: SkillItem[]
+  laserItems: SkillItem[]
+  shockwaves: Shockwave[]
+  worldRadius: number
+  status: string
+  tickCount: number
+}
+
+interface Shockwave {
+  x: number
+  y: number
+  spawnTick: number
+}
+
+interface GameResult {
+  id: string
+  username: string
+  score: number
+  alive: boolean
+}
+
+const serverState = ref<ServerGameState | null>(null)
+const gameResults = ref<GameResult[]>([])
+const serverNow = ref(0)
+
+function alivePlayerCount(): number {
+  if (!serverState.value) return 0
+  return Object.keys(serverState.value.players).filter(id => serverState.value!.players[id]?.alive).length
+}
+
+const PLAYER_COLORS = [
+  { body: '#4caf50', head: '#388e3c' },
+  { body: '#e53935', head: '#c62828' },
+  { body: '#1e88e5', head: '#1565c0' },
+  { body: '#fdd835', head: '#f9a825' },
+  { body: '#8e24aa', head: '#6a1b9a' },
+  { body: '#fb8c00', head: '#ef6c00' },
+  { body: '#00acc1', head: '#00838f' },
+  { body: '#ec407a', head: '#c2185b' },
+]
+
+function getPlayerColor(id: string): { body: string; head: string } {
+  if (!serverState.value) return { body: '#4caf50', head: '#388e3c' }
+  const ids = Object.keys(serverState.value.players)
+  const idx = ids.indexOf(id)
+  return PLAYER_COLORS[Math.max(0, idx) % PLAYER_COLORS.length]!
+}
+
+function playerColor(i: number): string {
+  return PLAYER_COLORS[i % PLAYER_COLORS.length]!.body
+}
 
 // ---- World ----
 const GRID_ROWS = 13
 const cellSize = ref(0)
 const worldRadius = ref(100)
 const camera = ref({ x: 0, y: 0 })
-const startWorldRadius = ref(100)
 
-// ---- Snake ----
-const SEGMENT_SPACING = 0.3
-const INITIAL_SEGMENTS = 12
-const ROTATION_SPEED = 0.07
+// ---- Snake (local player only for effects) ----
 const segments = ref<{ x: number; y: number }[]>([])
-let path: { x: number; y: number }[] = []
-let prevSegments: { x: number; y: number }[] = []
 const direction = ref(0)
-const targetDirection = ref(0)
 
-type FoodType = { color: string; points: number }
-const FOOD_TYPES: FoodType[] = [
-  { color: '#FF0000', points: 1 },
-  { color: '#FF7F00', points: 2 },
-  { color: '#FFFF00', points: 3 },
-  { color: '#00FF00', points: 4 },
-  { color: '#0000FF', points: 5 },
-  { color: '#4B0082', points: 6 },
-  { color: '#8B00FF', points: 7 },
-]
-
-type FoodItem = { x: number; y: number; type: FoodType }
-
-const foods = ref<FoodItem[]>([])
-const foodSpawnMax = ref(1)
+interface FoodType { color: string; points: number }
+interface FoodItem { x: number; y: number; type: FoodType }
+interface SkillItem { x: number; y: number; spawnTime: number; spawnTick?: number }
 
 const auth = useAuthStore()
-const scoreStore = useScoreStore()
 
-const gameStatus = ref<'idle' | 'playing' | 'paused' | 'gameover'>('idle')
 const score = ref(0)
-const invincibleEndTime = ref(0)
-
 const boosting = ref(false)
-const moveSpeed = computed(() => boosting.value ? 15 : 8)
 
 const isMobile = ref(false)
 const isLandscape = ref(true)
-
-const headImg = new Image()
-const headImg2 = new Image()
-const bodyImg = new Image()
-const deadHeadImg = new Image()
-const imagesLoaded = ref(false)
-let headSwapTimer = 0
-let headToggle = false
 
 const jOffsetX = ref(0)
 const jOffsetY = ref(0)
@@ -66,553 +134,334 @@ const jActive = ref(false)
 
 const isFullscreen = ref(false)
 
-function toggleFullscreen() {
-  if (!document.fullscreenElement) {
-    const el = document.documentElement
-    if (el.requestFullscreen) el.requestFullscreen()
-    else if ((el as any).webkitRequestFullscreen) (el as any).webkitRequestFullscreen()
-    else if ((el as any).msRequestFullscreen) (el as any).msRequestFullscreen()
-  } else {
-    if (document.exitFullscreen) document.exitFullscreen()
-    else if ((document as any).webkitExitFullscreen) (document as any).webkitExitFullscreen()
-    else if ((document as any).msExitFullscreen) (document as any).msExitFullscreen()
-  }
-}
-
-function onFullscreenChange() {
-  isFullscreen.value = !!document.fullscreenElement
-    || !!(document as any).webkitFullscreenElement
-    || !!(document as any).msFullscreenElement
-}
-
-let animationId = 0
-let growCounter = 0
-let deadByWall = false
-let invincibleFlashAlpha = 0
-let invincibleGlowTimer = 0
-let floatTexts: { x: number; y: number; text: string; alpha: number; vy: number }[] = []
-const phantoms = ref(0)
-const shields = ref(0)
-const shieldDisplayTime = ref(0)
-const phantomActive = ref(false)
-let phantomEndTime = 0
-let phantomAnim = 0
-const PHANTOM_LIFETIME = 10000
-const SKILL_TYPES_COUNT = 4
-type SkillItem = { x: number; y: number; spawnTime: number }
 const phantomItems = ref<SkillItem[]>([])
 const shieldItems = ref<SkillItem[]>([])
 const dietItems = ref<SkillItem[]>([])
 const magnetItems = ref<SkillItem[]>([])
+const laserItems = ref<SkillItem[]>([])
+let phantomAnim = 0
 let shieldItemAnim = 0
 let dietItemAnim = 0
-let dietHeadEndTime = 0
-let magnetActive = false
-let magnetEndTime = 0
 let magnetAnim = 0
+let laserAnim = 0
 let jCenterX = 0
 let jCenterY = 0
 let jTouchId = -1
 
 const J_RADIUS = 39
 
-const knobStyle = computed(() => ({
-  transform: `translate(${jOffsetX.value}px, ${jOffsetY.value}px)`
-}))
-
 let mqPointer: MediaQueryList
 let mqOrientation: MediaQueryList
-let lastFrameTime = 0
 let mouseAngle = 0
 const keysHeld = new Set<string>()
 let useMouseControl = true
 
-onMounted(() => {
-  mqPointer = window.matchMedia('(pointer: coarse)')
-  isMobile.value = mqPointer.matches
-  mqPointer.addEventListener('change', onPointerChange)
+const knobStyle = computed(() => ({
+  transform: `translate(${jOffsetX.value}px, ${jOffsetY.value}px)`
+}))
 
-  mqOrientation = window.matchMedia('(orientation: landscape)')
-  isLandscape.value = mqOrientation.matches
-  mqOrientation.addEventListener('change', onOrientationChange)
+function onFullscreenChange() {
+  const doc = document as Document & { webkitFullscreenElement?: Element; msFullscreenElement?: Element }
+  isFullscreen.value = !!doc.fullscreenElement || !!doc.webkitFullscreenElement || !!doc.msFullscreenElement
+}
 
-  resizeCanvas()
-  window.addEventListener('resize', resizeCanvas)
+let animationId = 0
+let floatTexts: { x: number; y: number; text: string; alpha: number; vy: number }[] = []
 
-  headImg.src = `${import.meta.env.BASE_URL}images/snake-head.jpg`
-  headImg2.src = `${import.meta.env.BASE_URL}images/snake-head2.jpg`
-  bodyImg.src = `${import.meta.env.BASE_URL}images/snake-body.jpg`
-  deadHeadImg.src = `${import.meta.env.BASE_URL}images/snake-head-dead.jpg`
-  Promise.all([
-    new Promise<void>(r => { headImg.onload = () => r(); headImg.onerror = () => r() }),
-    new Promise<void>(r => { headImg2.onload = () => r(); headImg2.onerror = () => r() }),
-    new Promise<void>(r => { bodyImg.onload = () => r(); bodyImg.onerror = () => r() }),
-    new Promise<void>(r => { deadHeadImg.onload = () => r(); deadHeadImg.onerror = () => r() })
-  ]).then(() => {
-    imagesLoaded.value = true
-    render()
+// ---- Lerp ----
+let lerpTarget: { x: number; y: number }[] = []
+const LERP_SPEED = 0.35
+
+// ---- Keyboard accumulation ----
+let localTargetDirection = 0
+const KEYBOARD_ROTATION_SPEED = 0.75
+
+// ---- Head images ----
+const headImg = new Image()
+const headImg2 = new Image()
+const deadHeadImg = new Image()
+let headSwapTimer = 0
+let headToggle = false
+
+interface BoostParticle {
+  x: number; y: number
+  vx: number; vy: number
+  life: number; maxLife: number
+  size: number; alpha: number
+  color: string
+}
+const boostParticles: BoostParticle[] = []
+const phantoms = ref(0)
+const shields = ref(0)
+const laserCharges = ref(0)
+
+interface CollisionParticle {
+  x: number; y: number
+  vx: number; vy: number
+  life: number; maxLife: number
+  size: number
+  color: string
+}
+const collisionParticles: CollisionParticle[] = []
+const processedShockwaves = new Set<number>()
+
+interface LaserFlash { originX: number; originY: number; direction: number; time: number }
+const laserFlashes: LaserFlash[] = []
+
+const phantomActive = ref(false)
+const phantomEndTime = ref(0)
+const magnetEndTime = ref(0)
+
+const magnetTimeLeft = computed(() => {
+  if (magnetEndTime.value <= 0) return 0
+  const remaining = Math.ceil((magnetEndTime.value - serverNow.value) / 1000)
+  return Math.max(0, remaining)
+})
+const phantomTimeLeft = computed(() => {
+  if (phantomEndTime.value <= 0) return 0
+  const remaining = Math.ceil((phantomEndTime.value - serverNow.value) / 1000)
+  return Math.max(0, remaining)
+})
+
+let socket: Socket | null = null
+
+function connectServer() {
+  socket = connectSocket()
+
+  socket.on('connect', () => {
+    connected.value = true
+    myId.value = socket!.id!
+    errorMsg.value = ''
   })
-  scoreStore.refresh()
-  document.addEventListener('touchstart', onJoystickStart)
-  document.addEventListener('touchmove', onJoystickMove, { passive: false })
-  document.addEventListener('touchend', onJoystickEnd)
-  document.addEventListener('touchcancel', onJoystickEnd)
-  document.addEventListener('keydown', handleKeydown)
-  document.addEventListener('keyup', handleKeyup)
-  document.addEventListener('fullscreenchange', onFullscreenChange)
-  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
-  document.addEventListener('MSFullscreenChange', onFullscreenChange)
-  const c = canvas.value
-  if (c) {
-    c.addEventListener('mousedown', onCanvasMouseDown)
-    c.addEventListener('contextmenu', onCanvasContextMenu)
-  }
-  document.addEventListener('mouseup', onCanvasMouseUp)
-})
 
-onUnmounted(() => {
-  if (mqPointer) mqPointer.removeEventListener('change', onPointerChange)
-  if (mqOrientation) mqOrientation.removeEventListener('change', onOrientationChange)
-  window.removeEventListener('resize', resizeCanvas)
-  document.removeEventListener('touchstart', onJoystickStart)
-  document.removeEventListener('touchmove', onJoystickMove)
-  document.removeEventListener('touchend', onJoystickEnd)
-  document.removeEventListener('touchcancel', onJoystickEnd)
-  document.removeEventListener('keydown', handleKeydown)
-  document.removeEventListener('keyup', handleKeyup)
-  document.removeEventListener('fullscreenchange', onFullscreenChange)
-  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
-  document.removeEventListener('MSFullscreenChange', onFullscreenChange)
-  const c = canvas.value
-  if (c) {
-    c.removeEventListener('mousedown', onCanvasMouseDown)
-    c.removeEventListener('contextmenu', onCanvasContextMenu)
-  }
-  document.removeEventListener('mouseup', onCanvasMouseUp)
-  cancelAnimationFrame(animationId)
-})
+  socket.on('connect_error', (err: Error) => {
+    connected.value = false
+    if (gamePhase.value === 'lobby') {
+      errorMsg.value = `無法連線到遊戲伺服器（${err.message}）`
+    }
+  })
 
-function onPointerChange(e: MediaQueryListEvent) {
-  isMobile.value = e.matches
+  socket.on('disconnect', () => {
+    connected.value = false
+    if (gamePhase.value !== 'lobby') {
+      gamePhase.value = 'lobby'
+      errorMsg.value = '與伺服器斷線'
+    }
+  })
+
+  socket.on('room_created', ({ roomCode: code }: { roomCode: string }) => {
+    roomCode.value = code
+    errorMsg.value = ''
+  })
+
+  socket.on('room_state', (state: { roomCode: string; players: PlayerInfo[]; status: string }) => {
+    playersInRoom.value = state.players
+    roomCode.value = state.roomCode
+    if (state.status === 'waiting' && gamePhase.value === 'gameover') {
+      gamePhase.value = 'lobby'
+      gameResults.value = []
+      serverState.value = null
+    }
+  })
+
+  socket.on('game_started', () => {
+    gamePhase.value = 'playing'
+    resetLocalState()
+  })
+
+  socket.on('game_state', (state: ServerGameState) => {
+    serverState.value = state
+    worldRadius.value = state.worldRadius
+    serverNow.value = state.tickCount * 50
+
+    // Update local player refs for rendering
+    const me = state.players[myId.value]
+    if (me) {
+      // Detect own death
+      if (!me.alive && gamePhase.value === 'playing') {
+        gamePhase.value = 'dead'
+      }
+      // Detect respawn
+      if (me.alive && gamePhase.value === 'dead') {
+        gamePhase.value = 'playing'
+        resetLocalState()
+      }
+      lerpTarget = me.segments.map(s => ({ x: s.x, y: s.y }))
+      if (segments.value.length === 0 || me.segments.length !== segments.value.length) {
+        segments.value = lerpTarget.map(s => ({ ...s }))
+      }
+      direction.value = me.direction
+      localTargetDirection = me.direction
+      score.value = me.score
+      shields.value = me.shields
+      boosting.value = me.boosting
+      phantomActive.value = me.phantomActive
+      phantomEndTime.value = me.phantomEndTime
+      phantoms.value = me.phantomCharges
+      magnetEndTime.value = me.magnetEndTime
+      laserCharges.value = me.laserCharges
+    }
+
+    // Track laser flashes for visual
+    for (const [, p] of Object.entries(state.players)) {
+      if (p.firingLaser && p.alive) {
+        laserFlashes.push({ originX: p.laserOriginX, originY: p.laserOriginY, direction: p.laserDirection, time: performance.now() })
+      }
+    }
+
+    // Sync items
+    phantomItems.value = state.phantomItems.map(i => ({ x: i.x, y: i.y, spawnTick: i.spawnTick, spawnTime: performance.now() - (serverNow.value - (i.spawnTick ?? 0) * 50) }))
+    shieldItems.value = state.shieldItems.map(i => ({ x: i.x, y: i.y, spawnTick: i.spawnTick, spawnTime: performance.now() - (serverNow.value - (i.spawnTick ?? 0) * 50) }))
+    dietItems.value = state.dietItems.map(i => ({ x: i.x, y: i.y, spawnTick: i.spawnTick, spawnTime: performance.now() - (serverNow.value - (i.spawnTick ?? 0) * 50) }))
+    magnetItems.value = state.magnetItems.map(i => ({ x: i.x, y: i.y, spawnTick: i.spawnTick, spawnTime: performance.now() - (serverNow.value - (i.spawnTick ?? 0) * 50) }))
+    laserItems.value = state.laserItems.map(i => ({ x: i.x, y: i.y, spawnTick: i.spawnTick, spawnTime: performance.now() - (serverNow.value - (i.spawnTick ?? 0) * 50) }))
+  })
+
+  socket.on('game_over', (results: GameResult[]) => {
+    gamePhase.value = 'gameover'
+    gameResults.value = results
+  })
+
+  socket.on('error', (msg: string) => {
+    errorMsg.value = msg
+  })
 }
 
-function onOrientationChange(e: MediaQueryListEvent) {
-  isLandscape.value = e.matches
-}
-
-function togglePause() {
-  if (gameStatus.value === 'playing') {
-    gameStatus.value = 'paused'
-  } else if (gameStatus.value === 'paused') {
-    gameStatus.value = 'playing'
-    lastFrameTime = 0
-  }
-}
-
-function updateWorldSize() {
-  const w = window.innerWidth
-  const h = window.innerHeight
-  const size = Math.floor(Math.min(w, h) / GRID_ROWS)
-  cellSize.value = size
-
-  const screenArea = w * h
-  const worldArea = screenArea * 7
-  const worldRadiusPx = Math.sqrt(worldArea / Math.PI)
-  worldRadius.value = worldRadiusPx / size
-  startWorldRadius.value = worldRadius.value
-}
-
-function startGame() {
-  if (isMobile.value && !isFullscreen.value) {
-    try { toggleFullscreen() } catch (_) {}
-    try { (screen as any).orientation?.lock?.('landscape').catch(() => {}) } catch (_) {}
-  }
-  updateWorldSize()
-
-  const totalSegs = INITIAL_SEGMENTS
-  const totalLen = totalSegs * SEGMENT_SPACING
-
-  path = []
-  for (let d = 0; d <= totalLen + 0.5; d += 0.05) {
-    path.push({ x: -d, y: 0 })
-  }
-  path.reverse()
-
-  segments.value = [{ x: 0, y: 0 }]
-  updateBody()
-  prevSegments = segments.value.map(s => ({ ...s }))
-  direction.value = 0
-  targetDirection.value = 0
-
+function resetLocalState() {
   score.value = 0
-  invincibleEndTime.value = 0
-  deadByWall = false
-  invincibleFlashAlpha = 0
-  invincibleGlowTimer = 0
-  growCounter = 0
-  floatTexts = []
-  phantoms.value = 0
   shields.value = 0
-  shieldDisplayTime.value = 0
+  phantoms.value = 0
   phantomActive.value = false
-  phantomEndTime = 0
-  phantomItems.value = []
-  shieldItems.value = []
-  dietItems.value = []
-  magnetItems.value = []
-  shieldItemAnim = 0
-  dietItemAnim = 0
-  dietHeadEndTime = 0
-  magnetActive = false
-  magnetEndTime = 0
-  magnetAnim = 0
-  mouseAngle = 0
   boosting.value = false
   keysHeld.clear()
   useMouseControl = true
   camera.value = { x: 0, y: 0 }
-  gameStatus.value = 'playing'
-  lastFrameTime = 0
-  foods.value = []
-  maintainFoodCount()
-  cancelAnimationFrame(animationId)
-  animationId = requestAnimationFrame(gameLoop)
+  segments.value = []
+  floatTexts = []
+  boostParticles.length = 0
+  collisionParticles.length = 0
+  processedShockwaves.clear()
+  laserFlashes.length = 0
+  laserCharges.value = 0
+  mouseAngle = 0
+  headSwapTimer = 0
+  headToggle = false
+  lerpTarget = []
+  localTargetDirection = 0
 }
 
-function gameLoop(timestamp: number) {
-  if (lastFrameTime === 0) lastFrameTime = timestamp
-  const dt = Math.min(timestamp - lastFrameTime, 50)
-  lastFrameTime = timestamp
-
-  if (gameStatus.value === 'playing') {
-    updateSnake(dt)
-    shieldDisplayTime.value = Math.max(0, (invincibleEndTime.value - performance.now()) / 1000)
-    maintainFoodCount()
-  }
-
-  if (phantomActive.value && timestamp >= phantomEndTime) {
-    phantomActive.value = false
-  }
-  if (magnetActive && timestamp >= magnetEndTime) {
-    magnetActive = false
-  }
-
-  phantomItems.value = phantomItems.value.filter(item => timestamp - item.spawnTime < PHANTOM_LIFETIME)
-  shieldItems.value = shieldItems.value.filter(item => timestamp - item.spawnTime < PHANTOM_LIFETIME)
-  dietItems.value = dietItems.value.filter(item => timestamp - item.spawnTime < PHANTOM_LIFETIME)
-  magnetItems.value = magnetItems.value.filter(item => timestamp - item.spawnTime < PHANTOM_LIFETIME)
-
-  if (headSwapTimer === 0) headSwapTimer = timestamp
-  if (timestamp - headSwapTimer >= 500) {
-    headToggle = !headToggle
-    headSwapTimer = timestamp
-  }
-
-  render()
-  animationId = requestAnimationFrame(gameLoop)
+// ---- Lobby ----
+function createRoom() {
+  if (!connected.value || !socket) return
+  const username = auth.currentUser?.displayName || '玩家'
+  errorMsg.value = ''
+  socket.emit('create_room', { username })
 }
 
-function updateSnake(dt: number) {
-  prevSegments = segments.value.map(s => ({ ...s }))
-  const head = segments.value[0]
-  if (!head) return
-
-  // Keyboard rotation
-  if (keysHeld.has('ArrowLeft') || keysHeld.has('a') || keysHeld.has('A')) {
-    targetDirection.value -= ROTATION_SPEED * 2
-    useMouseControl = false
-  }
-  if (keysHeld.has('ArrowRight') || keysHeld.has('d') || keysHeld.has('D')) {
-    targetDirection.value += ROTATION_SPEED * 2
-    useMouseControl = false
-  }
-  if (keysHeld.size === 0 && !jActive.value) {
-    useMouseControl = true
-  }
-
-  // Mouse control
-  if (useMouseControl && !isMobile.value) {
-    targetDirection.value = mouseAngle
-  }
-
-  // Smoothly rotate current direction toward target
-  let diff = targetDirection.value - direction.value
-  while (diff > Math.PI) diff -= Math.PI * 2
-  while (diff < -Math.PI) diff += Math.PI * 2
-  if (Math.abs(diff) < ROTATION_SPEED) {
-    direction.value = normalizeAngle(targetDirection.value)
-  } else {
-    direction.value += Math.sign(diff) * ROTATION_SPEED
-    direction.value = normalizeAngle(direction.value)
-  }
-
-  // Move head
-  const speed = moveSpeed.value
-  const step = speed * dt / 1000
-  head.x += Math.cos(direction.value) * step
-  head.y += Math.sin(direction.value) * step
-
-  // Boost drain
-  if (boosting.value && growCounter > 0) {
-    growCounter = Math.max(0, growCounter - 8 * dt / 1000)
-  }
-
-  // Add to path and update body
-  path.unshift({ ...head })
-  updateBody()
-  checkCollisions(dt)
+function joinRoom() {
+  if (!connected.value || !socket) return
+  const code = joinCodeInput.value.trim().toUpperCase()
+  if (!code) return
+  const username = auth.currentUser?.displayName || '玩家'
+  errorMsg.value = ''
+  socket.emit('join_room', { roomCode: code, username })
 }
 
-function normalizeAngle(a: number): number {
-  while (a > Math.PI) a -= Math.PI * 2
-  while (a < -Math.PI) a += Math.PI * 2
-  return a
+function startGame() {
+  if (!connected.value || !socket) return
+  errorMsg.value = ''
+  socket.emit('start_game')
 }
 
-function updateBody() {
-  const totalSegs = INITIAL_SEGMENTS + growCounter
-  const newSegs: { x: number; y: number }[] = []
-  let accumulated = 0
-  let pathIdx = 0
-
-  for (let i = 0; i < totalSegs; i++) {
-    const targetDist = i * SEGMENT_SPACING
-    while (pathIdx < path.length - 1) {
-      const p0 = path[pathIdx]!
-      const p1 = path[pathIdx + 1]!
-      const segLen = dist(p0, p1)
-      if (accumulated + segLen >= targetDist) {
-        const t = segLen > 0 ? (targetDist - accumulated) / segLen : 0
-        newSegs.push({
-          x: p0.x + (p1.x - p0.x) * t,
-          y: p0.y + (p1.y - p0.y) * t,
-        })
-        break
-      }
-      accumulated += segLen
-      pathIdx++
-    }
-    if (pathIdx >= path.length - 1) break
-  }
-
-  if (newSegs.length > 0) {
-    segments.value = newSegs
-  }
-
-  // Prune path
-  const keepLen = totalSegs * SEGMENT_SPACING + SEGMENT_SPACING * 4
-  let totalDist = 0
-  for (let i = 1; i < path.length; i++) {
-    totalDist += dist(path[i - 1]!, path[i]!)
-    if (totalDist > keepLen) {
-      path = path.slice(0, i + 1)
-      return
-    }
-  }
+function leaveRoom() {
+  if (!connected.value || !socket) return
+  socket.emit('leave_room')
+  roomCode.value = ''
+  playersInRoom.value = []
+  gamePhase.value = 'lobby'
+  errorMsg.value = ''
 }
 
-function dist(a: { x: number; y: number }, b: { x: number; y: number }): number {
-  return Math.hypot(b.x - a.x, b.y - a.y)
+function restartGame() {
+  if (!connected.value || !socket) return
+  errorMsg.value = ''
+  socket.emit('restart_game')
 }
 
-function isInvincible(): boolean {
-  return performance.now() < invincibleEndTime.value
+function backToLobby() {
+  if (!connected.value || !socket) return
+  socket.emit('leave_room')
+  gamePhase.value = 'lobby'
+  gameResults.value = []
+  serverState.value = null
+  roomCode.value = ''
+  playersInRoom.value = []
 }
 
-function clampToWorld(pos: { x: number; y: number }) {
-  const d = Math.hypot(pos.x, pos.y)
-  if (d >= worldRadius.value) {
-    const angle = Math.atan2(pos.y, pos.x)
-    pos.x = Math.cos(angle) * (worldRadius.value - 0.01)
-    pos.y = Math.sin(angle) * (worldRadius.value - 0.01)
-  }
-}
-
-function triggerInvincible(duration: number) {
-  const now = performance.now()
-  if (now < invincibleEndTime.value) {
-    invincibleEndTime.value = now + duration
-  } else {
-    invincibleEndTime.value = now + duration
-    invincibleFlashAlpha = 0.4
-    invincibleGlowTimer = 30
-    addFloatText('🛡️ 免死金牌！')
-  }
-}
-
-function checkCollisions(_dt: number) {
-  const head = segments.value[0]
-  if (!head) return
-
-  // Wall collision — clamp to boundary, never die
-  clampToWorld(head)
-
-  // Self collision — pass through (no interaction)
-  // (intentionally skipped)
-
-  // Future: other player body collision — auto-escape + death check
-  // (placeholder for multiplayer)
-
-  // Collect food
-  for (const f of foods.value) {
-    if (dist(head, f) < 0.5) {
-      const pts = f.type.points
-      const prevScore = score.value
-      score.value += pts
-      growCounter += pts
-      foods.value = foods.value.filter(f2 => f2 !== f)
-      const maxPerType = Math.floor(score.value / 10) + SKILL_TYPES_COUNT
-      if (phantomItems.value.length < maxPerType && Math.random() < 0.3) spawnPhantom()
-      if (shieldItems.value.length < maxPerType && Math.random() < 0.2) spawnShieldItem()
-      if (dietItems.value.length < maxPerType && Math.random() < 0.05) spawnDietItem()
-      if (magnetItems.value.length < maxPerType && Math.random() < 0.1) spawnMagnetItem()
-      if (Math.floor(score.value / 50) > Math.floor(prevScore / 50)) {
-        triggerInvincible(3000)
-      }
-      break
-    }
-  }
-
-  // Collect items
-  for (const item of phantomItems.value) {
-    if (dist(head, item) < 0.5) {
-      phantomItems.value = phantomItems.value.filter(x => x !== item)
-      phantoms.value++
-      addFloatText('+1 👻')
-    }
-  }
-  for (const item of shieldItems.value) {
-    if (dist(head, item) < 0.5) {
-      shieldItems.value = shieldItems.value.filter(x => x !== item)
-      triggerInvincible(5000)
-      shields.value++
-    }
-  }
-  for (const item of dietItems.value) {
-    if (dist(head, item) < 0.5) {
-      dietItems.value = dietItems.value.filter(x => x !== item)
-      dietHeadEndTime = performance.now() + 3000
-      const halfLen = Math.max(2, Math.ceil((INITIAL_SEGMENTS + growCounter) / 2))
-      growCounter = Math.max(0, halfLen - INITIAL_SEGMENTS)
-      addFloatText('💊 減半！')
-    }
-  }
-  for (const item of magnetItems.value) {
-    if (dist(head, item) < 0.5) {
-      magnetItems.value = magnetItems.value.filter(x => x !== item)
-      magnetActive = true
-      magnetEndTime = performance.now() + 5000
-      addFloatText('🧲 磁鐵！')
-    }
-  }
-
-  // Magnet effect
-  if (magnetActive) {
-    const inRange = (item: { x: number; y: number }) => Math.hypot(item.x - head.x, item.y - head.y) <= 3
-    for (const f of foods.value) {
-      if (inRange(f)) {
-        score.value += f.type.points
-        growCounter += f.type.points
-        foods.value = foods.value.filter(x => x !== f)
-      }
-    }
-    for (const item of phantomItems.value) {
-      if (inRange(item)) {
-        phantomItems.value = phantomItems.value.filter(x => x !== item)
-        phantoms.value++
-      }
-    }
-    for (const item of shieldItems.value) {
-      if (inRange(item)) {
-        shieldItems.value = shieldItems.value.filter(x => x !== item)
-        triggerInvincible(5000)
-        shields.value++
-      }
-    }
-    for (const item of dietItems.value) {
-      if (inRange(item)) {
-        dietItems.value = dietItems.value.filter(x => x !== item)
-        dietHeadEndTime = performance.now() + 3000
-        const halfLen = Math.max(2, Math.ceil((INITIAL_SEGMENTS + growCounter) / 2))
-        growCounter = Math.max(0, halfLen - INITIAL_SEGMENTS)
-      }
-    }
-  }
-}
-
-function addFloatText(text: string) {
-  const head = segments.value[0]
-  if (!head || cellSize.value <= 0) return
-  floatTexts.push({
-    x: 0,
-    y: 0,
-    text,
-    alpha: 1,
-    vy: -2,
-  })
-}
-
-function maintainFoodCount() {
-  const targetCount = Math.floor(0.005 * Math.PI * worldRadius.value * worldRadius.value)
-  const toSpawn = Math.max(0, targetCount - foods.value.length)
-  if (toSpawn <= 0) return
-  for (let i = 0; i < Math.min(toSpawn, 10); i++) {
-    const pos = randomPointInCircle(worldRadius.value * 0.9)
-    const type = FOOD_TYPES[Math.floor(Math.random() * FOOD_TYPES.length)]!
-    foods.value.push({ x: pos.x, y: pos.y, type })
-  }
-}
-
-function randomPointInCircle(r: number): { x: number; y: number } {
-  const angle = Math.random() * Math.PI * 2
-  const radius = Math.sqrt(Math.random()) * r
-  return { x: Math.cos(angle) * radius, y: Math.sin(angle) * radius }
-}
-
-function spawnPhantom() {
-  const pos = randomPointInCircle(worldRadius.value * 0.85)
-  phantomItems.value.push({ x: pos.x, y: pos.y, spawnTime: performance.now() })
-}
-
-function spawnShieldItem() {
-  const pos = randomPointInCircle(worldRadius.value * 0.85)
-  shieldItems.value.push({ x: pos.x, y: pos.y, spawnTime: performance.now() })
-}
-
-function spawnDietItem() {
-  const pos = randomPointInCircle(worldRadius.value * 0.85)
-  dietItems.value.push({ x: pos.x, y: pos.y, spawnTime: performance.now() })
-}
-
-function spawnMagnetItem() {
-  const pos = randomPointInCircle(worldRadius.value * 0.85)
-  magnetItems.value.push({ x: pos.x, y: pos.y, spawnTime: performance.now() })
+function returnToGame() {
+  if (!socket) return
+  socket.emit('respawn')
 }
 
 // ---- Controls ----
+function sendInput(input: { targetDirection?: number; boosting?: boolean }) {
+  if (!socket || gamePhase.value !== 'playing') return
+  socket.emit('player_input', input)
+}
+
+function activatePhantomSkill() {
+  socket?.emit('activate_phantom')
+}
+
+function fireLaserSkill() {
+  socket?.emit('activate_laser')
+}
+
 function handleKeydown(e: KeyboardEvent) {
   if (e.key === ' ') {
     e.preventDefault()
-    if (gameStatus.value === 'playing' || gameStatus.value === 'paused') togglePause()
     return
   }
-  if (gameStatus.value !== 'playing' && gameStatus.value !== 'idle') return
-  if (['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'a', 'A', 'd', 'D', 'w', 'W', 's', 'S'].includes(e.key)) {
+  if (gamePhase.value !== 'playing' && gamePhase.value !== 'lobby') return
+  if (['ArrowLeft', 'ArrowRight', 'a', 'A', 'd', 'D'].includes(e.key)) {
     e.preventDefault()
+    if (keysHeld.size === 0) {
+      localTargetDirection = direction.value
+    }
+    keysHeld.add(e.key)
+    useMouseControl = false
+    if (gamePhase.value === 'lobby') return
+    if (keysHeld.has('ArrowLeft') || keysHeld.has('a') || keysHeld.has('A')) {
+      localTargetDirection -= KEYBOARD_ROTATION_SPEED
+    }
+    if (keysHeld.has('ArrowRight') || keysHeld.has('d') || keysHeld.has('D')) {
+      localTargetDirection += KEYBOARD_ROTATION_SPEED
+    }
+    sendInput({ targetDirection: localTargetDirection })
   }
-  keysHeld.add(e.key)
-  if (gameStatus.value === 'idle' && (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'a' || e.key === 'A' || e.key === 'd' || e.key === 'D')) {
-    startGame()
-    return
+  if (e.key === 'w' || e.key === 'W') {
+    sendInput({ boosting: true })
+  }
+  if (e.key === '1') {
+    activatePhantomSkill()
+  }
+  if (e.key === '2') {
+    fireLaserSkill()
   }
 }
 
 function handleKeyup(e: KeyboardEvent) {
   keysHeld.delete(e.key)
+  if (e.key === 'w' || e.key === 'W') {
+    sendInput({ boosting: false })
+  }
+  if (keysHeld.size === 0 && !jActive.value) {
+    useMouseControl = true
+  }
 }
 
 function onCanvasMouseMove(e: MouseEvent) {
-  if (gameStatus.value !== 'playing') return
+  if (gamePhase.value !== 'playing') return
   const head = segments.value[0]
   if (!head) return
   const rect = canvas.value!.getBoundingClientRect()
@@ -623,17 +472,20 @@ function onCanvasMouseMove(e: MouseEvent) {
   const wx = (mx - halfW) / cellSize.value + camera.value.x
   const wy = (my - halfH) / cellSize.value + camera.value.y
   mouseAngle = Math.atan2(wy - head.y, wx - head.x)
+  if (useMouseControl) {
+    sendInput({ targetDirection: mouseAngle })
+  }
 }
 
 function onCanvasMouseDown(e: MouseEvent) {
-  if (e.button === 2 && gameStatus.value === 'playing') {
-    boosting.value = true
+  if (e.button === 2 && gamePhase.value === 'playing') {
+    sendInput({ boosting: true })
     e.preventDefault()
   }
 }
 
 function onCanvasMouseUp(e: MouseEvent) {
-  if (e.button === 2) boosting.value = false
+  if (e.button === 2) sendInput({ boosting: false })
 }
 
 function onCanvasContextMenu(e: MouseEvent) {
@@ -657,11 +509,11 @@ function updateJoystick(cx: number, cy: number) {
   if (dist < deadzone) return
 
   const angle = Math.atan2(dy, dx)
-  targetDirection.value = angle
+  sendInput({ targetDirection: angle })
 }
 
 function onJoystickStart(e: TouchEvent) {
-  if (gameStatus.value !== 'playing' || !isMobile.value || !isLandscape.value) return
+  if (gamePhase.value !== 'playing' || !isMobile.value || !isLandscape.value) return
   const touch = e.touches[0]
   if (!touch) return
   const el = joystickRef.value
@@ -695,8 +547,121 @@ function onJoystickEnd(e: TouchEvent) {
   jOffsetY.value = 0
 }
 
+// ---- Lifecycle ----
+onMounted(() => {
+  mqPointer = window.matchMedia('(pointer: coarse)')
+  isMobile.value = mqPointer.matches
+  mqPointer.addEventListener('change', onPointerChange)
+
+  mqOrientation = window.matchMedia('(orientation: landscape)')
+  isLandscape.value = mqOrientation.matches
+  mqOrientation.addEventListener('change', onOrientationChange)
+
+  resizeCanvas()
+  window.addEventListener('resize', resizeCanvas)
+
+  connectServer()
+
+  document.addEventListener('touchstart', onJoystickStart)
+  document.addEventListener('touchmove', onJoystickMove, { passive: false })
+  document.addEventListener('touchend', onJoystickEnd)
+  document.addEventListener('touchcancel', onJoystickEnd)
+  document.addEventListener('keydown', handleKeydown)
+  document.addEventListener('keyup', handleKeyup)
+  document.addEventListener('fullscreenchange', onFullscreenChange)
+  document.addEventListener('webkitfullscreenchange', onFullscreenChange)
+  document.addEventListener('MSFullscreenChange', onFullscreenChange)
+  const c = canvas.value
+  if (c) {
+    c.addEventListener('mousedown', onCanvasMouseDown)
+    c.addEventListener('contextmenu', onCanvasContextMenu)
+  }
+  document.addEventListener('mouseup', onCanvasMouseUp)
+
+  animationId = requestAnimationFrame(renderLoop)
+
+  // Load head images
+  headImg.src = new URL('/Snack-game/img/head.jpg', window.location.origin).href
+  headImg2.src = new URL('/Snack-game/img/head2.jpg', window.location.origin).href
+  deadHeadImg.src = new URL('/Snack-game/img/head_dead.jpg', window.location.origin).href
+})
+
+onUnmounted(() => {
+  if (mqPointer) mqPointer.removeEventListener('change', onPointerChange)
+  if (mqOrientation) mqOrientation.removeEventListener('change', onOrientationChange)
+  window.removeEventListener('resize', resizeCanvas)
+  document.removeEventListener('touchstart', onJoystickStart)
+  document.removeEventListener('touchmove', onJoystickMove)
+  document.removeEventListener('touchend', onJoystickEnd)
+  document.removeEventListener('touchcancel', onJoystickEnd)
+  document.removeEventListener('keydown', handleKeydown)
+  document.removeEventListener('keyup', handleKeyup)
+  document.removeEventListener('fullscreenchange', onFullscreenChange)
+  document.removeEventListener('webkitfullscreenchange', onFullscreenChange)
+  document.removeEventListener('MSFullscreenChange', onFullscreenChange)
+  const c = canvas.value
+  if (c) {
+    c.removeEventListener('mousedown', onCanvasMouseDown)
+    c.removeEventListener('contextmenu', onCanvasContextMenu)
+  }
+  document.removeEventListener('mouseup', onCanvasMouseUp)
+  cancelAnimationFrame(animationId)
+  disconnectSocket()
+})
+
+function onPointerChange(e: MediaQueryListEvent) {
+  isMobile.value = e.matches
+}
+
+function onOrientationChange(e: MediaQueryListEvent) {
+  isLandscape.value = e.matches
+}
+
+// ---- Rendering loop ----
+function renderLoop() {
+  try {
+    headSwapTimer++
+    if (headSwapTimer >= 10) {
+      headToggle = !headToggle
+      headSwapTimer = 0
+    }
+    if (gamePhase.value === 'playing') {
+      if (!useMouseControl && keysHeld.size > 0) {
+        if (keysHeld.has('ArrowLeft') || keysHeld.has('a') || keysHeld.has('A')) {
+          localTargetDirection -= KEYBOARD_ROTATION_SPEED
+        }
+        if (keysHeld.has('ArrowRight') || keysHeld.has('d') || keysHeld.has('D')) {
+          localTargetDirection += KEYBOARD_ROTATION_SPEED
+        }
+        sendInput({ targetDirection: localTargetDirection })
+      }
+    }
+    render()
+  } catch (e) {
+    console.error('Render error:', e)
+  }
+  animationId = requestAnimationFrame(renderLoop)
+}
+
 // ---- Rendering ----
+// ---- Lerp ----
+function applyLerp() {
+  if (lerpTarget.length === 0 || segments.value.length === 0) return
+  if (lerpTarget.length !== segments.value.length) {
+    segments.value = lerpTarget.map(s => ({ ...s }))
+    return
+  }
+  for (let i = 0; i < segments.value.length; i++) {
+    const s = segments.value[i]
+    const t = lerpTarget[i]
+    if (!s || !t) continue
+    s.x += (t.x - s.x) * LERP_SPEED
+    s.y += (t.y - s.y) * LERP_SPEED
+  }
+}
+
 function render() {
+  applyLerp()
   const c = canvas.value
   if (!c) return
   const ctx = c.getContext('2d')
@@ -706,54 +671,63 @@ function render() {
   const w = window.innerWidth
   const h = window.innerHeight
 
-  // Smooth camera follow
+  // Smooth camera follow on local player
   const head = segments.value[0]
   if (head) {
     camera.value.x += (head.x - camera.value.x) * 0.08
     camera.value.y += (head.y - camera.value.y) * 0.08
   }
 
-  // Clear to void color
   ctx.fillStyle = '#0d0d1a'
   ctx.fillRect(0, 0, w, h)
 
   ctx.save()
-  // Camera transform: world coords → screen coords
   ctx.translate(w / 2 - camera.value.x * size, h / 2 - camera.value.y * size)
 
-  // Draw play area circle
   const r = worldRadius.value * size
   ctx.beginPath()
   ctx.arc(0, 0, r, 0, Math.PI * 2)
   ctx.fillStyle = '#1a1a2e'
   ctx.fill()
 
-  // Clip to play area
   ctx.save()
   ctx.beginPath()
   ctx.arc(0, 0, r, 0, Math.PI * 2)
   ctx.clip()
 
-  // Draw world content
-  drawPhantomItem(ctx, size)
-  drawShieldItem(ctx, size)
-  drawDietItem(ctx, size)
-  drawMagnetItem(ctx, size)
-  drawFood(ctx, size)
-  drawMagnetEffect(ctx, size)
-  drawSnake(ctx, size, segments.value)
-  drawBoostEffect(ctx, size)
+  if (serverState.value) {
+    drawPhantomItem(ctx, size)
+    drawShieldItem(ctx, size)
+    drawDietItem(ctx, size)
+    drawMagnetItem(ctx, size)
+    drawLaserItem(ctx, size)
+    drawLaser(ctx, size)
+    drawMagnetEffect(ctx, size)
+    drawFood(ctx, size)
+    drawShockwave(ctx, size)
 
-  ctx.restore() // remove clip
+    // Draw all players
+    const allPlayers = serverState.value.players
+    const playerIds = Object.keys(allPlayers)
+    for (const pid of playerIds) {
+      const p = allPlayers[pid]
+      if (!p || !p.alive || p.segments.length < 2) continue
+      drawSnake(ctx, size, p)
+    }
 
-  // Draw boundary ring
+    // Local particles
+    drawBoostEffect(ctx, size)
+    drawCollisionParticles(ctx, size)
+  }
+
+  ctx.restore()
+
   ctx.beginPath()
   ctx.arc(0, 0, r, 0, Math.PI * 2)
   ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)'
   ctx.lineWidth = 2
   ctx.stroke()
 
-  // Outer glow ring
   const grad = ctx.createRadialGradient(0, 0, r - 8, 0, 0, r + 8)
   grad.addColorStop(0, 'rgba(255, 50, 50, 0)')
   grad.addColorStop(0.5, 'rgba(255, 50, 50, 0.12)')
@@ -763,46 +737,34 @@ function render() {
   ctx.fillStyle = grad
   ctx.fill()
 
-  ctx.restore() // camera transform
+  ctx.restore()
 
-  // Screen-space effects
   drawInvincibleEffect(ctx, size)
 
-  // Crosshair cursor hint for desktop
-  if (gameStatus.value === 'playing' && !isMobile.value) {
+  if (gamePhase.value === 'playing' && !isMobile.value) {
     ctx.font = '14px sans-serif'
     ctx.fillStyle = 'rgba(255,255,255,0.3)'
     ctx.textAlign = 'center'
     ctx.fillText('🖱️ 滑鼠控制方向', w / 2, h - 20)
   }
+
+  // Debug info
+  ctx.font = '12px monospace'
+  ctx.fillStyle = 'rgba(255,255,255,0.5)'
+  ctx.textAlign = 'left'
+  const ss = serverState.value
+  const pCount = ss ? Object.keys(ss.players).length : 0
+  const segLen = segments.value.length
+  ctx.fillText(`phase=${gamePhase.value} ss=${!!ss} players=${pCount} segs=${segLen} cell=${cellSize.value} wr=${worldRadius.value.toFixed(1)}`, 8, h - 8)
 }
 
-function drawSnake(ctx: CanvasRenderingContext2D, size: number, segs: { x: number; y: number }[]) {
-  if (segs.length < 2) return
-  const isPhantom = phantomActive.value
-  const invincible = isInvincible()
-
-  // Invincible golden glow
-  if (invincible) {
-    ctx.save()
-    ctx.shadowColor = '#ffd700'
-    ctx.shadowBlur = 22
-    ctx.lineJoin = 'round'
-    ctx.lineCap = 'round'
-    ctx.lineWidth = size * 0.85
-    ctx.globalAlpha = 0.35 + 0.15 * Math.sin(performance.now() * 0.006)
-    ctx.strokeStyle = '#ffd700'
-    ctx.beginPath()
-    for (let i = 0; i < segs.length; i++) {
-      const s = segs[i]!
-      const sx = s.x * size
-      const sy = s.y * size
-      if (i === 0) ctx.moveTo(sx, sy)
-      else ctx.lineTo(sx, sy)
-    }
-    ctx.stroke()
-    ctx.restore()
-  }
+function drawSnake(ctx: CanvasRenderingContext2D, size: number, player: ServerPlayer) {
+  const segs = player.id === myId.value && segments.value.length > 0 ? segments.value : player.segments
+  if (!segs || segs.length < 2) return
+  const color = getPlayerColor(player.id)
+  const isPhantom = player.phantomActive
+  const isInvincible = player.invincibleEndTime > serverNow.value && !isPhantom
+  const glowPulse = isInvincible ? 0.5 + Math.sin(serverNow.value * 0.01) * 0.5 : 0
 
   // Body
   ctx.save()
@@ -816,7 +778,11 @@ function drawSnake(ctx: CanvasRenderingContext2D, size: number, segs: { x: numbe
     ctx.globalAlpha = 0.45
     ctx.strokeStyle = '#9977dd'
   } else {
-    ctx.strokeStyle = '#388e3c'
+    ctx.strokeStyle = color!.body
+  }
+  if (isInvincible) {
+    ctx.shadowColor = '#ffd700'
+    ctx.shadowBlur = 12 + glowPulse * 33
   }
 
   ctx.beginPath()
@@ -843,6 +809,21 @@ function drawSnake(ctx: CanvasRenderingContext2D, size: number, segs: { x: numbe
     ctx.stroke()
   }
 
+  // Golden body overlay for invincible
+  if (isInvincible) {
+    ctx.lineWidth = size * 0.5
+    ctx.strokeStyle = `rgba(255, 215, 0, ${0.15 + glowPulse * 0.2})`
+    ctx.beginPath()
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i]!
+      const sx = s.x * size
+      const sy = s.y * size
+      if (i === 0) ctx.moveTo(sx, sy)
+      else ctx.lineTo(sx, sy)
+    }
+    ctx.stroke()
+  }
+
   ctx.restore()
 
   // Head
@@ -850,6 +831,138 @@ function drawSnake(ctx: CanvasRenderingContext2D, size: number, segs: { x: numbe
   if (!head) return
   const hx = head.x * size
   const hy = head.y * size
+
+  // Head halo (invincible)
+  if (isInvincible) {
+    const haloR = size * (1.0 + glowPulse * 1.0)
+    const grad = ctx.createRadialGradient(hx, hy, 0, hx, hy, haloR)
+    grad.addColorStop(0, `rgba(255, 215, 0, ${0.25 + glowPulse * 0.35})`)
+    grad.addColorStop(1, 'rgba(255, 215, 0, 0)')
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(hx, hy, haloR, 0, Math.PI * 2)
+    ctx.fillStyle = grad
+    ctx.fill()
+    ctx.restore()
+
+    // Second inner halo for extra pop
+    const innerR = size * (0.5 + glowPulse * 0.3)
+    const grad2 = ctx.createRadialGradient(hx, hy, 0, hx, hy, innerR)
+    grad2.addColorStop(0, `rgba(255, 255, 200, ${0.3 + glowPulse * 0.4})`)
+    grad2.addColorStop(1, 'rgba(255, 255, 200, 0)')
+    ctx.save()
+    ctx.beginPath()
+    ctx.arc(hx, hy, innerR, 0, Math.PI * 2)
+    ctx.fillStyle = grad2
+    ctx.fill()
+    ctx.restore()
+  }
+
+  // Shield orbs (multi-orbit around head when invincible)
+  if (isInvincible) {
+    const orbs = [
+      { count: 3, speed: 0.010, radius: 0.80, size: 0.12 },
+      { count: 3, speed: -0.007, radius: 1.10, size: 0.08 },
+    ]
+    for (const ring of orbs) {
+      for (let i = 0; i < ring.count; i++) {
+        const angle = (i / ring.count) * Math.PI * 2 + serverNow.value * ring.speed
+        const sx = hx + Math.cos(angle) * size * ring.radius
+        const sy = hy + Math.sin(angle) * size * ring.radius
+        ctx.save()
+        ctx.shadowColor = '#ffd700'
+        ctx.shadowBlur = 14
+        ctx.fillStyle = '#ffe044'
+        ctx.globalAlpha = 0.5 + Math.sin(serverNow.value * 0.02 + i * 2) * 0.3
+        ctx.beginPath()
+        ctx.arc(sx, sy, size * ring.size, 0, Math.PI * 2)
+        ctx.fill()
+        ctx.restore()
+      }
+    }
+  }
+
+  // Invincible pulse ring (periodic golden ripple)
+  if (isInvincible) {
+    const pulsePhase = (serverNow.value % 3000) / 3000
+    const pR = size * (0.3 + pulsePhase * 1.2)
+    const pAlpha = (1 - pulsePhase) * 0.3
+    ctx.save()
+    ctx.strokeStyle = `rgba(255, 215, 0, ${pAlpha})`
+    ctx.lineWidth = size * 0.1
+    ctx.shadowColor = '#ffd700'
+    ctx.shadowBlur = 8
+    ctx.beginPath()
+    ctx.arc(hx, hy, pR, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.restore()
+  }
+
+  const isLocal = player.id === myId.value
+
+  // Knockback trail (golden glow when being pushed back)
+  const kbMag = Math.hypot(player.knockbackX || 0, player.knockbackY || 0)
+  if (kbMag > 0.05) {
+    ctx.save()
+    ctx.lineWidth = size * 0.9
+    ctx.strokeStyle = `rgba(255, 215, 0, ${Math.min(kbMag * 0.3, 0.5)})`
+    ctx.shadowColor = '#ffd700'
+    ctx.shadowBlur = 20 + kbMag * 30
+    ctx.beginPath()
+    for (let i = 0; i < segs.length; i++) {
+      const s = segs[i]!
+      const sx = s.x * size
+      const sy = s.y * size
+      if (i === 0) ctx.moveTo(sx, sy)
+      else ctx.lineTo(sx, sy)
+    }
+    ctx.stroke()
+    ctx.restore()
+
+    // Speed lines behind head
+    ctx.save()
+    const knockAngle = Math.atan2(player.knockbackY || 0, player.knockbackX || 0)
+    for (let i = 0; i < 4; i++) {
+      const scatter = (Math.random() - 0.5) * 0.8
+      const lineAngle = knockAngle + Math.PI + scatter
+      const lineLen = size * (0.3 + kbMag * 0.5)
+      const offset = (Math.random() - 0.5) * size * 0.4
+      const perp = knockAngle + Math.PI / 2
+      const lx = hx + Math.cos(perp) * offset
+      const ly = hy + Math.sin(perp) * offset
+      ctx.strokeStyle = `rgba(255, 215, 0, ${Math.min(kbMag * 0.4, 0.5)})`
+      ctx.lineWidth = size * 0.06
+      ctx.shadowColor = '#ffd700'
+      ctx.shadowBlur = 6
+      ctx.beginPath()
+      ctx.moveTo(lx, ly)
+      ctx.lineTo(lx + Math.cos(lineAngle) * lineLen, ly + Math.sin(lineAngle) * lineLen)
+      ctx.stroke()
+    }
+    ctx.restore()
+  }
+
+  if (isLocal && headImg.complete && headImg.naturalWidth > 0) {
+    const isDiet = player.dietHeadEndTime > serverNow.value
+    const img = (!player.alive || isDiet ? deadHeadImg : (headToggle ? headImg : headImg2)) || headImg
+    if (img.complete && img.naturalWidth > 0) {
+      ctx.save()
+      if (isPhantom) {
+        ctx.shadowColor = '#aa88ff'
+        ctx.shadowBlur = 16
+        ctx.globalAlpha = 0.45
+      } else if (isInvincible) {
+        ctx.shadowColor = '#ffd700'
+        ctx.shadowBlur = 12 + glowPulse * 28
+      }
+      const hs = size * 1.2
+      ctx.translate(hx, hy)
+      ctx.rotate(direction.value)
+      ctx.drawImage(img, -hs / 2, -hs / 2, hs, hs)
+      ctx.restore()
+      return
+    }
+  }
 
   if (isPhantom) {
     ctx.save()
@@ -862,35 +975,20 @@ function drawSnake(ctx: CanvasRenderingContext2D, size: number, segs: { x: numbe
     ctx.fill()
     ctx.restore()
   } else {
-    const headAngle = direction.value
-    const isDietHead = dietHeadEndTime > 0 && performance.now() < dietHeadEndTime
-    const useDead = isDietHead || (deadByWall && gameStatus.value === 'gameover')
-    const headSource = useDead ? deadHeadImg : (headToggle ? headImg2 : headImg)
-
-    if (headSource.complete && headSource.naturalWidth > 0) {
       ctx.save()
-      ctx.translate(hx, hy)
-      ctx.rotate(headAngle)
-      ctx.drawImage(headSource, -size / 2, -size / 2, size, size)
-      ctx.restore()
-    } else {
-      ctx.fillStyle = '#4caf50'
-      ctx.beginPath()
-      ctx.arc(hx, hy, size * 0.4, 0, Math.PI * 2)
-      ctx.fill()
-    }
+      if (isInvincible) {
+        ctx.shadowColor = '#ffd700'
+        ctx.shadowBlur = 12 + glowPulse * 28
+      }
+    ctx.fillStyle = color!.head
+    ctx.beginPath()
+    ctx.arc(hx, hy, size * 0.4, 0, Math.PI * 2)
+    ctx.fill()
+    ctx.restore()
   }
 }
 
 function drawInvincibleEffect(ctx: CanvasRenderingContext2D, size: number) {
-  // Screen flash on invincible pickup
-  if (invincibleFlashAlpha > 0) {
-    ctx.fillStyle = `rgba(255, 215, 0, ${invincibleFlashAlpha})`
-    ctx.fillRect(0, 0, window.innerWidth, window.innerHeight)
-    invincibleFlashAlpha -= 0.03
-  }
-
-  // Floating texts (screen-space)
   for (let i = floatTexts.length - 1; i >= 0; i--) {
     const ft = floatTexts[i]!
     ft.y += ft.vy
@@ -919,32 +1017,96 @@ function drawInvincibleEffect(ctx: CanvasRenderingContext2D, size: number) {
 }
 
 function drawBoostEffect(ctx: CanvasRenderingContext2D, size: number) {
-  if (!boosting.value || !segments.value[0]) return
-  const head = segments.value[0]!
-  const angle = direction.value
-  const hx = head.x * size
-  const hy = head.y * size
-  const t = performance.now()
-  ctx.save()
-  ctx.globalAlpha = 0.35
-  for (let i = 0; i < 6; i++) {
-    const offset = Math.sin(t * 0.01 + i * 1.2) * size * 0.3
-    const perp = angle + Math.PI / 2
-    const px = hx + Math.cos(perp) * offset
-    const py = hy + Math.sin(perp) * offset
-    const len = size * (0.8 + 0.4 * Math.sin(t * 0.008 + i * 0.9))
-    ctx.strokeStyle = `rgba(255, 200, 50, ${0.3 + 0.2 * Math.sin(t * 0.01 + i)})`
-    ctx.lineWidth = size * 0.08
-    ctx.beginPath()
-    ctx.moveTo(px - Math.cos(angle) * size * 0.3, py - Math.sin(angle) * size * 0.3)
-    ctx.lineTo(px - Math.cos(angle) * (size * 0.3 + len), py - Math.sin(angle) * (size * 0.3 + len))
-    ctx.stroke()
+  const now = performance.now()
+
+  if (boosting.value) {
+    const head = segments.value[0]
+    if (head) {
+      const angle = direction.value
+      const count = 3 + Math.floor(Math.random() * 4)
+      const BOOST_COLORS = ['#ff4500', '#ffaa00', '#ff6600', '#ff2200', '#ffcc00', '#ffffff']
+      for (let i = 0; i < count; i++) {
+        const scatter = (Math.random() - 0.5) * 1.0
+        const emitAngle = angle + Math.PI + scatter
+        const speed = 2 + Math.random() * 3
+        boostParticles.push({
+          x: head.x,
+          y: head.y,
+          vx: Math.cos(emitAngle) * speed,
+          vy: Math.sin(emitAngle) * speed,
+          life: 600 + Math.random() * 600,
+          maxLife: 600 + Math.random() * 600,
+          size: size * (0.06 + Math.random() * 0.1),
+          alpha: 0.8 + Math.random() * 0.2,
+          color: BOOST_COLORS[Math.floor(Math.random() * BOOST_COLORS.length)]!,
+        })
+      }
+    }
   }
+
+  ctx.save()
+  for (let i = boostParticles.length - 1; i >= 0; i--) {
+    const p = boostParticles[i]!
+    p.x += p.vx * 0.02
+    p.y += p.vy * 0.02
+    p.vx *= 0.97
+    p.vy *= 0.97
+    p.life -= 16
+    p.alpha = Math.max(0, p.life / p.maxLife)
+    p.size *= 0.99
+
+    if (p.life <= 0 || p.alpha <= 0) {
+      boostParticles.splice(i, 1)
+      continue
+    }
+
+    const px = p.x * size
+    const py = p.y * size
+    ctx.globalAlpha = p.alpha
+    ctx.shadowColor = p.color
+    ctx.shadowBlur = 16
+    ctx.fillStyle = p.color
+    ctx.beginPath()
+    ctx.arc(px, py, p.size, 0, Math.PI * 2)
+    ctx.fill()
+  }
+
+  if (boosting.value && segments.value[0]) {
+    const head = segments.value[0]
+    const angle = direction.value
+    const hx = head.x * size
+    const hy = head.y * size
+    const t = now
+    ctx.globalAlpha = 0.3
+    ctx.shadowBlur = 0
+    for (let i = 0; i < 5; i++) {
+      const offset = Math.sin(t * 0.012 + i * 1.4) * size * 0.35
+      const perp = angle + Math.PI / 2
+      const px = hx + Math.cos(perp) * offset
+      const py = hy + Math.sin(perp) * offset
+      const len = size * (0.6 + 0.4 * Math.sin(t * 0.01 + i * 1.1))
+      const grad = ctx.createLinearGradient(
+        px - Math.cos(angle) * size * 0.3, py - Math.sin(angle) * size * 0.3,
+        px - Math.cos(angle) * (size * 0.3 + len), py - Math.sin(angle) * (size * 0.3 + len)
+      )
+      grad.addColorStop(0, 'rgba(255, 200, 50, 0.6)')
+      grad.addColorStop(0.5, 'rgba(255, 100, 20, 0.3)')
+      grad.addColorStop(1, 'rgba(255, 50, 0, 0)')
+      ctx.strokeStyle = grad
+      ctx.lineWidth = size * 0.10 + size * 0.04 * Math.sin(t * 0.008 + i * 0.9)
+      ctx.beginPath()
+      ctx.moveTo(px - Math.cos(angle) * size * 0.3, py - Math.sin(angle) * size * 0.3)
+      ctx.lineTo(px - Math.cos(angle) * (size * 0.3 + len), py - Math.sin(angle) * (size * 0.3 + len))
+      ctx.stroke()
+    }
+  }
+
   ctx.restore()
 }
 
 function drawFood(ctx: CanvasRenderingContext2D, size: number) {
-  foods.value.forEach(f => {
+  if (!serverState.value) return
+  serverState.value.foods.forEach(f => {
     ctx.fillStyle = f.type.color
     ctx.beginPath()
     ctx.arc(f.x * size, f.y * size, size / 2 - 2, 0, Math.PI * 2)
@@ -954,6 +1116,106 @@ function drawFood(ctx: CanvasRenderingContext2D, size: number) {
     ctx.arc(f.x * size - 3, f.y * size - 3, size / 6, 0, Math.PI * 2)
     ctx.fill()
   })
+}
+
+function drawShockwave(ctx: CanvasRenderingContext2D, size: number) {
+  if (!serverState.value) return
+  const now = serverState.value.tickCount * 50
+  for (const sw of serverState.value.shockwaves) {
+    const age = now - sw.spawnTick * 50
+    if (age < 0 || age > 2000) continue
+    const t = age / 2000
+
+    // Spawn local particles from shockwave
+    if (!processedShockwaves.has(sw.spawnTick) && age < 100) {
+      processedShockwaves.add(sw.spawnTick)
+      for (let i = 0; i < 20; i++) {
+        const angle = Math.random() * Math.PI * 2
+        const speed = 1 + Math.random() * 4
+        collisionParticles.push({
+          x: sw.x, y: sw.y,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 800 + Math.random() * 800,
+          maxLife: 800 + Math.random() * 800,
+          size: size * (0.04 + Math.random() * 0.1),
+          color: ['#ffd700', '#ffe44d', '#ffffff', '#ffaa00', '#ffcc00'][Math.floor(Math.random() * 5)]!,
+        })
+      }
+    }
+
+    const sx = sw.x * size
+    const sy = sw.y * size
+    const maxR = 4 * size
+    ctx.save()
+
+    // Ring 1 - outer thick
+    ctx.save()
+    ctx.strokeStyle = `rgba(255, 215, 0, ${(1 - t) * 0.25})`
+    ctx.lineWidth = (1 - t) * size * 1.0 + 1
+    ctx.shadowColor = '#ffd700'
+    ctx.shadowBlur = 15
+    ctx.beginPath()
+    ctx.arc(sx, sy, t * maxR, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.restore()
+
+    // Ring 2 - inner bright
+    ctx.save()
+    ctx.strokeStyle = `rgba(255, 255, 200, ${(1 - t) * 0.5})`
+    ctx.lineWidth = (1 - t) * size * 0.5 + 0.5
+    ctx.shadowColor = '#ffee88'
+    ctx.shadowBlur = 20
+    ctx.beginPath()
+    ctx.arc(sx, sy, t * maxR * 0.8, 0, Math.PI * 2)
+    ctx.stroke()
+    ctx.restore()
+
+    // Ring 3 - core white flash
+    if (t < 0.3) {
+      const coreT = t / 0.3
+      ctx.save()
+      ctx.fillStyle = `rgba(255, 255, 255, ${(1 - coreT) * 0.6})`
+      ctx.shadowColor = '#ffffff'
+      ctx.shadowBlur = 30
+      ctx.beginPath()
+      ctx.arc(sx, sy, size * (0.5 + coreT * 2), 0, Math.PI * 2)
+      ctx.fill()
+      ctx.restore()
+    }
+
+    ctx.restore()
+  }
+}
+
+function drawCollisionParticles(ctx: CanvasRenderingContext2D, size: number) {
+  ctx.save()
+  for (let i = collisionParticles.length - 1; i >= 0; i--) {
+    const p = collisionParticles[i]!
+    p.x += p.vx * 0.02
+    p.y += p.vy * 0.02
+    p.vx *= 0.97
+    p.vy *= 0.97
+    p.life -= 16
+    const alpha = Math.max(0, p.life / p.maxLife)
+    p.size *= 0.998
+
+    if (p.life <= 0) {
+      collisionParticles.splice(i, 1)
+      continue
+    }
+
+    const px = p.x * size
+    const py = p.y * size
+    ctx.globalAlpha = alpha
+    ctx.shadowColor = p.color
+    ctx.shadowBlur = 12
+    ctx.fillStyle = p.color
+    ctx.beginPath()
+    ctx.arc(px, py, p.size, 0, Math.PI * 2)
+    ctx.fill()
+  }
+  ctx.restore()
 }
 
 function drawItemBlink(ctx: CanvasRenderingContext2D, size: number, item: SkillItem, anim: number, color: string, shadow: string, emoji: string) {
@@ -1012,10 +1274,16 @@ function drawMagnetItem(ctx: CanvasRenderingContext2D, size: number) {
   magnetItems.value.forEach(item => drawItemBlink(ctx, size, item, magnetAnim, '#4488ff', '#4488ff', '🧲'))
 }
 
+function drawLaserItem(ctx: CanvasRenderingContext2D, size: number) {
+  laserAnim++
+  laserItems.value.forEach(item => drawItemBlink(ctx, size, item, laserAnim, '#00ddff', '#00ffff', '🔫'))
+}
+
 function drawMagnetEffect(ctx: CanvasRenderingContext2D, size: number) {
-  if (!magnetActive) return
+  const me = serverState.value?.players[myId.value]
+  if (!me?.magnetActive) return
   magnetAnim++
-  const head = segments.value[0]
+  const head = me.segments[0]
   if (!head) return
   const cx = head.x * size
   const cy = head.y * size
@@ -1067,6 +1335,60 @@ function drawMagnetEffect(ctx: CanvasRenderingContext2D, size: number) {
   ctx.restore()
 }
 
+function drawLaser(ctx: CanvasRenderingContext2D, size: number) {
+  const now = performance.now()
+  for (let i = laserFlashes.length - 1; i >= 0; i--) {
+    const flash = laserFlashes[i]!
+    const age = now - flash.time
+    if (age > 300) {
+      laserFlashes.splice(i, 1)
+      continue
+    }
+
+    const ox = flash.originX * size
+    const oy = flash.originY * size
+    const dir = flash.direction
+    const range = 50 * size
+    const ex = ox + Math.cos(dir) * range
+    const ey = oy + Math.sin(dir) * range
+    const alpha = Math.max(0, 1 - age / 300)
+
+    ctx.save()
+
+    // Outer glow
+    ctx.shadowColor = '#00ddff'
+    ctx.shadowBlur = 40
+    ctx.strokeStyle = `rgba(0, 220, 255, ${0.25 * alpha})`
+    ctx.lineWidth = size * 2
+    ctx.beginPath()
+    ctx.moveTo(ox, oy)
+    ctx.lineTo(ex, ey)
+    ctx.stroke()
+
+    // Main beam
+    ctx.shadowColor = '#00ffff'
+    ctx.shadowBlur = 25
+    ctx.strokeStyle = `rgba(100, 255, 255, ${0.5 * alpha})`
+    ctx.lineWidth = size * 1.2
+    ctx.beginPath()
+    ctx.moveTo(ox, oy)
+    ctx.lineTo(ex, ey)
+    ctx.stroke()
+
+    // Bright core
+    ctx.shadowColor = '#ffffff'
+    ctx.shadowBlur = 15
+    ctx.strokeStyle = `rgba(255, 255, 255, ${0.85 * alpha})`
+    ctx.lineWidth = size * 0.4
+    ctx.beginPath()
+    ctx.moveTo(ox, oy)
+    ctx.lineTo(ex, ey)
+    ctx.stroke()
+
+    ctx.restore()
+  }
+}
+
 function resizeCanvas() {
   const c = canvas.value
   if (!c) return
@@ -1076,7 +1398,11 @@ function resizeCanvas() {
 
   const size = Math.floor(Math.min(w, h) / GRID_ROWS)
   cellSize.value = size
-  updateWorldSize()
+
+  const screenArea = w * h
+  const worldArea = screenArea * 7
+  const worldRadiusPx = Math.sqrt(worldArea / Math.PI)
+  worldRadius.value = worldRadiusPx / size
 
   c.width = w * dpr
   c.height = h * dpr
@@ -1084,10 +1410,6 @@ function resizeCanvas() {
   c.style.height = `${h}px`
   const ctx = c.getContext('2d')
   if (ctx) ctx.scale(dpr, dpr)
-
-  if (gameStatus.value === 'idle' || gameStatus.value === 'gameover') {
-    render()
-  }
 }
 </script>
 
@@ -1095,79 +1417,93 @@ function resizeCanvas() {
   <div class="canvas-wrapper">
     <canvas ref="canvas" id="gameCanvas" @mousemove="onCanvasMouseMove"></canvas>
 
-    <!-- Desktop -->
+    <!-- Desktop Lobby -->
     <template v-if="!isMobile">
-      <div class="score-bar">分數：<strong>{{ score }}</strong>　👻 {{ phantoms }}　<span :class="isInvincible() ? 'shield-active' : 'shield-inactive'">🛡️ {{ shields }}<template v-if="isInvincible()"> {{ shieldDisplayTime.toFixed(1) }}s</template></span></div>
-      <button class="pause-btn pause-btn-desktop" @click="togglePause">
-        {{ gameStatus === 'playing' ? '⏸' : '▶' }}
-      </button>
-      <button class="fs-btn" @click="toggleFullscreen">{{ isFullscreen ? '⤓' : '⛶' }}</button>
+      <!-- Playing HUD -->
+      <div v-if="gamePhase === 'playing'" class="score-bar">
+        分數：<strong>{{ score }}</strong>　👻 {{ phantoms }}　🛡️ {{ shields }}　🔫 {{ laserCharges }}
+        <span v-if="phantomActive" class="phantom-badge">虛化 {{ phantomTimeLeft }}s</span>
+        <span v-if="magnetTimeLeft" class="magnet-countdown">🧲 {{ magnetTimeLeft }}s</span>
+        <span class="player-count">　玩家：{{ alivePlayerCount() }}</span>
+      </div>
 
-      <div class="overlay" v-if="gameStatus !== 'playing'">
+      <!-- Lobby -->
+      <div class="overlay" v-if="gamePhase === 'lobby'">
         <div class="overlay-content">
-          <template v-if="gameStatus === 'idle'">
-            <div class="idle-lb-card" v-if="scoreStore.leaderboard.length > 0">
-              <h1>🏆 排行榜</h1>
-              <div class="idle-lb-table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>玩家</th>
-                      <th>最高分</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(entry, i) in scoreStore.leaderboard" :key="entry.id"
-                        :class="{ me: entry.id === auth.currentUser?.uid }">
-                      <td>{{ i + 1 }}</td>
-                      <td>{{ entry.username }}</td>
-                      <td>{{ entry.highScore }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+          <div class="lobby-card">
+            <h1>🐍 多人貪食蛇</h1>
+            <p v-if="errorMsg" class="error-msg">{{ errorMsg }}</p>
+            <p v-if="!connected" class="connecting">連線中...</p>
+
+            <template v-if="!roomCode">
+              <button class="btn" @click="createRoom" :disabled="!connected">建立房間</button>
+              <div class="divider">或</div>
+              <div class="join-row">
+                <input class="code-input" v-model="joinCodeInput" placeholder="輸入房間代碼" maxlength="4"
+                       @keyup.enter="joinRoom" />
+                <button class="btn btn-sm" @click="joinRoom" :disabled="!connected || !joinCodeInput.trim()">加入</button>
+              </div>
+            </template>
+
+            <template v-else>
+              <div class="room-code-display">
+                房間代碼：<strong>{{ roomCode }}</strong>
+              </div>
+              <div class="player-list">
+                <div v-for="(p, i) in playersInRoom" :key="p.id" class="player-item"
+                     :class="{ host: i === 0, me: p.id === myId }">
+                  <span class="player-dot" :style="{ background: playerColor(i) }"></span>
+                  {{ p.username }}{{ i === 0 ? ' 👑' : '' }}{{ p.id === myId ? ' (你)' : '' }}
+                </div>
+              </div>
+              <div v-if="isHost" class="start-row">
+                <button class="btn" @click="startGame" :disabled="playersInRoom.length < 1">開始遊戲</button>
+              </div>
+              <button class="btn btn-secondary" @click="leaveRoom">離開房間</button>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dead overlay (spectator mode) -->
+      <div class="overlay" v-if="gamePhase === 'dead'">
+        <div class="overlay-content">
+          <div class="lobby-card">
+            <h1>💀 你已死亡</h1>
+            <p class="dead-subtitle">觀戰中</p>
+            <div class="btn-row">
+              <button class="btn" @click="returnToGame">返回遊戲</button>
+              <button class="btn btn-secondary" @click="backToLobby">返回大廳</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- Game Over -->
+      <div class="overlay" v-if="gamePhase === 'gameover'">
+        <div class="overlay-content">
+          <div class="lobby-card">
+            <h1>💀 遊戲結束</h1>
+            <div class="result-list">
+              <div v-for="(r, i) in gameResults" :key="r.id" class="result-item"
+                   :class="{ winner: r.alive, me: r.id === myId }">
+                <span class="rank">{{ i + 1 }}</span>
+                <span class="player-dot" :style="{ background: playerColor(i) }"></span>
+                {{ r.username }}{{ r.id === myId ? ' (你)' : '' }}
+                <span class="result-score">{{ r.score }}</span>
+                <span v-if="r.alive" class="winner-badge">🏆</span>
               </div>
             </div>
-            <p>🐍 準備開始</p>
-            <p style="font-size:14px;opacity:0.5;margin:-8px 0 12px">滑鼠或 ← → 控制方向</p>
-            <button class="btn" @click="startGame()">開始遊戲</button>
-          </template>
-          <template v-else-if="gameStatus === 'paused'">
-            <p>⏸️ 已暫停</p>
-            <button class="btn" @click="togglePause()">繼續</button>
-          </template>
-          <template v-else-if="gameStatus === 'gameover'">
-            <div class="idle-lb-card" v-if="scoreStore.leaderboard.length > 0">
-              <h1>🏆 排行榜</h1>
-              <div class="idle-lb-table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>玩家</th>
-                      <th>最高分</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(entry, i) in scoreStore.leaderboard" :key="entry.id"
-                        :class="{ me: entry.id === auth.currentUser?.uid }">
-                      <td>{{ i + 1 }}</td>
-                      <td>{{ entry.username }}</td>
-                      <td>{{ entry.highScore }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+            <div class="btn-row">
+              <button v-if="isHost" class="btn" @click="restartGame">🔄 重新開始</button>
+              <button class="btn btn-secondary" @click="backToLobby">返回大廳</button>
             </div>
-            <p>💀 Game Over</p>
-            <p class="final-score">分數：{{ score }}</p>
-            <button class="btn" @click="startGame()">重新開始</button>
-          </template>
+          </div>
         </div>
       </div>
     </template>
 
-    <!-- 手機直立提示 -->
+    <!-- Mobile: portrait hint -->
     <template v-else-if="!isLandscape">
       <div class="rotate-hint">
         <div class="rotate-icon">↻</div>
@@ -1175,16 +1511,15 @@ function resizeCanvas() {
       </div>
     </template>
 
-    <!-- 手機橫向遊戲 -->
+    <!-- Mobile: game + lobby -->
     <template v-else>
-      <div class="score-bar score-bar-mobile">分數：<strong>{{ score }}</strong>　👻 {{ phantoms }}　<span :class="isInvincible() ? 'shield-active' : 'shield-inactive'">🛡️ {{ shields }}<template v-if="isInvincible()"> {{ shieldDisplayTime.toFixed(1) }}s</template></span></div>
+      <div v-if="gamePhase === 'playing'" class="score-bar score-bar-mobile">
+        分數：<strong>{{ score }}</strong>　👻 {{ phantoms }}　🛡️ {{ shields }}　🔫 {{ laserCharges }}
+        <span v-if="phantomActive" class="phantom-badge">虛化 {{ phantomTimeLeft }}s</span>
+        <span v-if="magnetTimeLeft" class="magnet-countdown">🧲 {{ magnetTimeLeft }}s</span>
+      </div>
 
-      <button class="pause-btn" @click="togglePause">
-        {{ gameStatus === 'playing' ? '⏸' : '▶' }}
-      </button>
-      <button class="fs-btn" @click="toggleFullscreen">{{ isFullscreen ? '⤓' : '⛶' }}</button>
-
-      <div class="joystick" ref="joystickRef">
+      <div class="joystick" ref="joystickRef" v-if="gamePhase === 'playing'">
         <div class="joystick-ring">
           <span class="arrow up">↑</span>
           <span class="arrow right">→</span>
@@ -1194,65 +1529,84 @@ function resizeCanvas() {
         </div>
       </div>
 
-      <div class="overlay" v-if="gameStatus !== 'playing'">
+      <button class="phantom-btn" v-if="gamePhase === 'playing'" @click="activatePhantomSkill">
+        👻 {{ phantoms }}
+      </button>
+
+      <button class="laser-btn" v-if="gamePhase === 'playing'" @click="fireLaserSkill">
+        🔫 {{ laserCharges }}
+      </button>
+
+      <div class="overlay" v-if="gamePhase === 'lobby'">
         <div class="overlay-content">
-          <template v-if="gameStatus === 'idle'">
-            <div class="idle-lb-card" v-if="scoreStore.leaderboard.length > 0">
-              <h1>🏆 排行榜</h1>
-              <div class="idle-lb-table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>玩家</th>
-                      <th>最高分</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(entry, i) in scoreStore.leaderboard" :key="entry.id"
-                        :class="{ me: entry.id === auth.currentUser?.uid }">
-                      <td>{{ i + 1 }}</td>
-                      <td>{{ entry.username }}</td>
-                      <td>{{ entry.highScore }}</td>
-                    </tr>
-                  </tbody>
-                </table>
+          <div class="lobby-card">
+            <h1>🐍 多人貪食蛇</h1>
+            <p v-if="errorMsg" class="error-msg">{{ errorMsg }}</p>
+            <p v-if="!connected" class="connecting">連線中...</p>
+
+            <template v-if="!roomCode">
+              <button class="btn" @click="createRoom" :disabled="!connected">建立房間</button>
+              <div class="divider">或</div>
+              <div class="join-row">
+                <input class="code-input" v-model="joinCodeInput" placeholder="房間代碼" maxlength="4"
+                       @keyup.enter="joinRoom" />
+                <button class="btn btn-sm" @click="joinRoom" :disabled="!connected || !joinCodeInput.trim()">加入</button>
+              </div>
+            </template>
+
+            <template v-else>
+              <div class="room-code-display">
+                房間代碼：<strong>{{ roomCode }}</strong>
+              </div>
+              <div class="player-list">
+                <div v-for="(p, i) in playersInRoom" :key="p.id" class="player-item"
+                     :class="{ host: i === 0, me: p.id === myId }">
+                  <span class="player-dot" :style="{ background: playerColor(i) }"></span>
+                  {{ p.username }}{{ i === 0 ? ' 👑' : '' }}{{ p.id === myId ? ' (你)' : '' }}
+                </div>
+              </div>
+              <div v-if="isHost" class="start-row">
+                <button class="btn" @click="startGame" :disabled="playersInRoom.length < 1">開始遊戲</button>
+              </div>
+              <button class="btn btn-secondary" @click="leaveRoom">離開房間</button>
+            </template>
+          </div>
+        </div>
+      </div>
+
+      <!-- Dead overlay (mobile) -->
+      <div class="overlay" v-if="gamePhase === 'dead'">
+        <div class="overlay-content">
+          <div class="lobby-card">
+            <h1>💀 你已死亡</h1>
+            <p class="dead-subtitle">觀戰中</p>
+            <div class="btn-row">
+              <button class="btn" @click="returnToGame">返回遊戲</button>
+              <button class="btn btn-secondary" @click="backToLobby">返回大廳</button>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="overlay" v-if="gamePhase === 'gameover'">
+        <div class="overlay-content">
+          <div class="lobby-card">
+            <h1>💀 遊戲結束</h1>
+            <div class="result-list">
+              <div v-for="(r, i) in gameResults" :key="r.id" class="result-item"
+                   :class="{ winner: r.alive, me: r.id === myId }">
+                <span class="rank">{{ i + 1 }}</span>
+                <span class="player-dot" :style="{ background: playerColor(i) }"></span>
+                {{ r.username }}{{ r.id === myId ? ' (你)' : '' }}
+                <span class="result-score">{{ r.score }}</span>
+                <span v-if="r.alive" class="winner-badge">🏆</span>
               </div>
             </div>
-            <p>🐍 準備開始</p>
-            <button class="btn" @click="startGame()">開始遊戲</button>
-          </template>
-          <template v-else-if="gameStatus === 'paused'">
-            <p>⏸️ 已暫停</p>
-            <button class="btn" @click="togglePause()">繼續</button>
-          </template>
-          <template v-else-if="gameStatus === 'gameover'">
-            <div class="idle-lb-card" v-if="scoreStore.leaderboard.length > 0">
-              <h1>🏆 排行榜</h1>
-              <div class="idle-lb-table-wrap">
-                <table>
-                  <thead>
-                    <tr>
-                      <th>#</th>
-                      <th>玩家</th>
-                      <th>最高分</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    <tr v-for="(entry, i) in scoreStore.leaderboard" :key="entry.id"
-                        :class="{ me: entry.id === auth.currentUser?.uid }">
-                      <td>{{ i + 1 }}</td>
-                      <td>{{ entry.username }}</td>
-                      <td>{{ entry.highScore }}</td>
-                    </tr>
-                  </tbody>
-                </table>
-              </div>
+            <div class="btn-row">
+              <button v-if="isHost" class="btn" @click="restartGame">🔄 重新開始</button>
+              <button class="btn btn-secondary" @click="backToLobby">返回大廳</button>
             </div>
-            <p>💀 Game Over</p>
-            <p class="final-score">分數：{{ score }}</p>
-            <button class="btn" @click="startGame()">重新開始</button>
-          </template>
+          </div>
         </div>
       </div>
     </template>
@@ -1317,6 +1671,33 @@ html, body {
   padding-right: calc(12px + env(safe-area-inset-right, 0px));
 }
 
+.player-count {
+  font-size: 16px;
+  opacity: 0.7;
+}
+
+.phantom-badge {
+  font-size: 14px;
+  background: rgba(170, 136, 255, 0.3);
+  color: #c8aaff;
+  border: 1px solid rgba(170, 136, 255, 0.5);
+  border-radius: 4px;
+  padding: 1px 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
+.magnet-countdown {
+  font-size: 14px;
+  background: rgba(68, 136, 255, 0.3);
+  color: #88bbff;
+  border: 1px solid rgba(68, 136, 255, 0.5);
+  border-radius: 4px;
+  padding: 1px 8px;
+  margin-left: 8px;
+  vertical-align: middle;
+}
+
 .overlay {
   position: absolute;
   inset: 0;
@@ -1338,9 +1719,106 @@ html, body {
   font-size: 28px;
 }
 
-.final-score {
-  font-size: 20px !important;
-  opacity: 0.8;
+.connecting {
+  font-size: 16px !important;
+  opacity: 0.6;
+}
+
+.error-msg {
+  font-size: 14px !important;
+  color: #ff6b6b;
+}
+
+.lobby-card {
+  background: #16213e;
+  padding: 28px 32px;
+  border-radius: 16px;
+  width: 360px;
+  max-width: 85vw;
+  text-align: center;
+  color: #fff;
+}
+
+.lobby-card h1 {
+  margin: 0 0 16px;
+  font-size: 24px;
+}
+
+.divider {
+  margin: 12px 0;
+  opacity: 0.4;
+  font-size: 14px;
+}
+
+.join-row {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  align-items: center;
+}
+
+.code-input {
+  width: 120px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.2);
+  border-radius: 8px;
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  font-size: 18px;
+  text-align: center;
+  letter-spacing: 4px;
+  text-transform: uppercase;
+  outline: none;
+}
+
+.code-input:focus {
+  border-color: #4caf50;
+}
+
+.room-code-display {
+  font-size: 18px;
+  margin-bottom: 16px;
+}
+
+.room-code-display strong {
+  font-size: 32px;
+  color: #4caf50;
+  letter-spacing: 6px;
+}
+
+.player-list {
+  margin-bottom: 16px;
+}
+
+.player-item {
+  padding: 8px 12px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 16px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.04);
+  margin-bottom: 4px;
+}
+
+.player-item.host {
+  background: rgba(255,215,0,0.08);
+}
+
+.player-item.me {
+  font-weight: 700;
+}
+
+.player-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  display: inline-block;
+  flex-shrink: 0;
+}
+
+.start-row {
+  margin-bottom: 8px;
 }
 
 .btn {
@@ -1352,10 +1830,72 @@ html, body {
   color: #fff;
   cursor: pointer;
   transition: background 0.15s;
+  font-family: inherit;
 }
 
 .btn:hover {
   background: #43a047;
+}
+
+.btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+.btn-secondary {
+  background: rgba(255,255,255,0.1);
+  font-size: 14px;
+  padding: 8px 24px;
+  margin-top: 8px;
+}
+
+.btn-secondary:hover {
+  background: rgba(255,255,255,0.15);
+}
+
+.btn-sm {
+  padding: 10px 20px;
+  font-size: 16px;
+}
+
+.result-list {
+  margin-bottom: 16px;
+}
+
+.result-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.04);
+  margin-bottom: 4px;
+  font-size: 16px;
+}
+
+.result-item.winner {
+  background: rgba(255,215,0,0.12);
+}
+
+.result-item.me {
+  font-weight: 700;
+}
+
+.rank {
+  width: 24px;
+  text-align: center;
+  opacity: 0.5;
+  font-size: 14px;
+}
+
+.result-score {
+  margin-left: auto;
+  font-weight: 700;
+  color: #4caf50;
+}
+
+.winner-badge {
+  margin-left: 4px;
 }
 
 .rotate-hint {
@@ -1385,58 +1925,6 @@ html, body {
   0% { transform: rotate(0deg); }
   50% { transform: rotate(90deg); }
   100% { transform: rotate(0deg); }
-}
-
-.pause-btn {
-  position: absolute;
-  top: calc(8px + env(safe-area-inset-top, 0px));
-  right: calc(8px + env(safe-area-inset-right, 0px));
-  width: 44px;
-  height: 44px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.35);
-  color: #fff;
-  font-size: 20px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  backdrop-filter: blur(4px);
-  z-index: 2;
-  transition: background 0.1s;
-}
-
-.pause-btn:active {
-  background: rgba(255, 255, 255, 0.2);
-}
-
-.pause-btn-desktop:hover {
-  background: rgba(255, 255, 255, 0.15);
-}
-
-.fs-btn {
-  position: absolute;
-  top: calc(8px + env(safe-area-inset-top, 0px));
-  right: calc(60px + env(safe-area-inset-right, 0px));
-  width: 44px;
-  height: 44px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 50%;
-  background: rgba(0, 0, 0, 0.35);
-  color: #fff;
-  font-size: 18px;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  backdrop-filter: blur(4px);
-  z-index: 2;
-  transition: background 0.1s;
-}
-
-.fs-btn:active {
-  background: rgba(255, 255, 255, 0.2);
 }
 
 .joystick {
@@ -1510,43 +1998,71 @@ html, body {
   box-shadow: 0 0 12px rgba(255, 255, 255, 0.25);
 }
 
-.idle-lb-card {
-  background: #16213e;
-  padding: 20px 24px;
-  border-radius: 16px;
-  width: 340px;
-  max-width: 85vw;
+.btn-row {
+  display: flex;
+  gap: 8px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-top: 16px;
+}
+
+.btn-row .btn-secondary {
+  margin-top: 0;
+}
+
+.dead-subtitle {
   text-align: center;
-  color: #fff;
-  margin-bottom: 16px;
-}
-.idle-lb-card h1 {
-  margin: 0 0 12px;
-  font-size: 22px;
-}
-.idle-lb-table-wrap {
-  max-height: 220px;
-  overflow-y: auto;
-}
-.idle-lb-card table {
-  width: 100%;
-  border-collapse: collapse;
-}
-.idle-lb-card th {
-  font-size: 13px;
-  opacity: 0.6;
-  padding: 6px 4px;
-  border-bottom: 1px solid rgba(255,255,255,0.1);
-}
-.idle-lb-card td {
-  padding: 7px 4px;
+  color: #aaa;
   font-size: 14px;
-  border-bottom: 1px solid rgba(255,255,255,0.05);
+  margin-top: -8px;
+  margin-bottom: 8px;
 }
-.idle-lb-card tr.me td {
-  color: #4caf50;
-  font-weight: 700;
+
+.phantom-btn {
+  position: absolute;
+  bottom: calc(40px + env(safe-area-inset-bottom, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  z-index: 2;
+  font-size: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(170, 136, 255, 0.25);
+  border: 2px solid rgba(170, 136, 255, 0.4);
+  color: #c8aaff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: none;
+  transition: background 0.15s, box-shadow 0.15s;
 }
-.shield-active { color: #ffd700; }
-.shield-inactive { opacity: 0.35; }
+.phantom-btn:active {
+  background: rgba(170, 136, 255, 0.5);
+  box-shadow: 0 0 16px rgba(170, 136, 255, 0.4);
+}
+
+.laser-btn {
+  position: absolute;
+  bottom: calc(100px + env(safe-area-inset-bottom, 0px));
+  right: calc(12px + env(safe-area-inset-right, 0px));
+  z-index: 2;
+  font-size: 24px;
+  width: 56px;
+  height: 56px;
+  border-radius: 50%;
+  background: rgba(0, 200, 255, 0.2);
+  border: 2px solid rgba(0, 200, 255, 0.4);
+  color: #88eeff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  touch-action: none;
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.laser-btn:active {
+  background: rgba(0, 200, 255, 0.5);
+  box-shadow: 0 0 16px rgba(0, 200, 255, 0.4);
+}
 </style>

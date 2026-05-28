@@ -25,8 +25,8 @@ export const useAuthStore = defineStore('auth', () => {
     error.value = ''
     try {
       await signInWithPopup(auth, googleProvider)
-    } catch (err: any) {
-      if (err.code !== 'auth/popup-closed-by-user') {
+    } catch (err) {
+      if ((err as { code?: string }).code !== 'auth/popup-closed-by-user') {
         error.value = 'Google 登入失敗'
       }
     }
