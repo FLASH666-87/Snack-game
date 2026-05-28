@@ -581,9 +581,10 @@ onMounted(() => {
   animationId = requestAnimationFrame(renderLoop)
 
   // Load head images
-  headImg.src = new URL('/Snack-game/img/head.jpg', window.location.origin).href
-  headImg2.src = new URL('/Snack-game/img/head2.jpg', window.location.origin).href
-  deadHeadImg.src = new URL('/Snack-game/img/head_dead.jpg', window.location.origin).href
+  const base = import.meta.env.BASE_URL || '/'
+  headImg.src = `${base}img/head.jpg`
+  headImg2.src = `${base}img/head2.jpg`
+  deadHeadImg.src = `${base}img/head_dead.jpg`
 })
 
 onUnmounted(() => {
