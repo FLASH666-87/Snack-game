@@ -326,7 +326,9 @@ function getRoomState(room) {
 const distPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'dist')
 if (existsSync(distPath)) {
   app.use(express.static(distPath))
-  app.get('*', (req, res) => {
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next()
+    // SPA fallback: serve index.html for all unmatched routes
     res.sendFile(join(distPath, 'index.html'))
   })
 }
