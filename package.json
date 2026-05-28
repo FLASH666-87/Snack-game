@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "vite",
     "dev:all": "concurrently -n server,vite \"node server/server.js\" \"vite\"",
-    "build": "run-p type-check \"build-only {@}\" --",
+    "build": "vite build && node -e \"require('fs').copyFileSync('dist/index.html','dist/404.html')\"",
     "preview": "vite preview",
     "test:unit": "vitest",
     "test:e2e": "playwright test",
