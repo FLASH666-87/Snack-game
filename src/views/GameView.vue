@@ -1431,6 +1431,7 @@ function resizeCanvas() {
       <!-- Lobby -->
       <div class="overlay" v-if="gamePhase === 'lobby'">
         <div class="overlay-content">
+          <router-link to="/todos" class="dev-tools-link">📋 開發人員工具</router-link>
           <div class="lobby-card">
             <h1>🐍 多人貪食蛇</h1>
             <p v-if="errorMsg" class="error-msg">{{ errorMsg }}</p>
@@ -1540,6 +1541,7 @@ function resizeCanvas() {
 
       <div class="overlay" v-if="gamePhase === 'lobby'">
         <div class="overlay-content">
+          <router-link to="/todos" class="dev-tools-link">📋 開發人員工具</router-link>
           <div class="lobby-card">
             <h1>🐍 多人貪食蛇</h1>
             <p v-if="errorMsg" class="error-msg">{{ errorMsg }}</p>
@@ -2065,5 +2067,20 @@ html, body {
 .laser-btn:active {
   background: rgba(0, 200, 255, 0.5);
   box-shadow: 0 0 16px rgba(0, 200, 255, 0.4);
+}
+
+.dev-tools-link {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  color: rgba(255, 255, 255, 0.5);
+  text-decoration: none;
+  font-size: 13px;
+  font-family: 'Segoe UI', sans-serif;
+  transition: color 0.15s;
+  z-index: 1;
+}
+.dev-tools-link:hover {
+  color: #4caf50;
 }
 </style>

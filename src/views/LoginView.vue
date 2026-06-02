@@ -35,6 +35,7 @@ async function loginGoogle() {
       </button>
 
       <p class="lb-link" @click="router.push('/leaderboard')">🏆 排行榜</p>
+      <p class="lb-link" @click="router.push('/todos')">📋 開發人員工具</p>
       <router-link class="privacy-link" to="/privacy">隱私權政策</router-link>
     </div>
   </div>

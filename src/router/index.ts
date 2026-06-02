@@ -9,6 +9,7 @@ const router = createRouter({
     { path: '/game', name: 'game', component: () => import('../views/GameView.vue') },
     { path: '/leaderboard', name: 'leaderboard', component: () => import('../views/LeaderboardView.vue') },
     { path: '/privacy', name: 'privacy', component: () => import('../views/PrivacyView.vue') },
+    { path: '/todos', name: 'todos', component: () => import('../views/TodoView.vue') },
   ],
 })
 

@@ -4,8 +4,8 @@ const VITE_SOCKET_URL: string = import.meta.env.VITE_SOCKET_URL || ''
 
 function getSocketUrl(): string {
   const origin = typeof window !== 'undefined' ? window.location.origin : ''
-  // github.io → connect to Railway (cross-origin)
-  if (typeof window !== 'undefined' && window.location.hostname.includes('github.io')) {
+  // github.io or vercel.app → connect to Railway (cross-origin)
+  if (typeof window !== 'undefined' && (window.location.hostname.includes('github.io') || window.location.hostname.includes('vercel.app'))) {
     return 'https://snack-game-production.up.railway.app'
   }
   return origin

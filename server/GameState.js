@@ -14,7 +14,7 @@ export const FOOD_TYPES = [
   { color: '#8B00FF', points: 7 },
 ]
 
-export const PHANTOM_LIFETIME = 3000
+export const PHANTOM_LIFETIME = 10000
 export const SKILL_TYPES_COUNT = 5
 export const LASER_RANGE = 50
 
