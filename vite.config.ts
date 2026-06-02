@@ -56,7 +56,7 @@ function apiPlugin() {
 
 // https://vite.dev/config/
 export default defineConfig({
-  base: process.env.RAILWAY_SERVICE_ID ? '/' : (process.env.VITE_BASE_URL || '/Snack-game/'),
+  base: (process.env.RAILWAY_SERVICE_ID || process.env.VERCEL) ? '/' : (process.env.VITE_BASE_URL || '/Snack-game/'),
   plugins: [
     tailwindcss(),
     vue(),
